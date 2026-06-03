@@ -46,18 +46,22 @@
 pip install -r requirements.txt
 python main.py
 ```
-или просто `run.bat`.
 
 Зависимости: `numpy`, `PyQt5`, `pyqtgraph`, `openpyxl`, `loguru`, `QtAwesome`.
 
 ## Сборка в .exe
 ```bat
-build.bat
+python build.py            REM собрать текущей версией
+python build.py 1.2.0      REM задать версию и собрать
+python build.py --clean    REM пересоздать .venv с нуля
 ```
-Скрипт ставит зависимости и собирает один файл `dist\FarZone.exe` по `FarZone.spec`
-(в spec включены `theme.qss`, иконки и шрифты `qtawesome`).
+Скрипт создаёт изолированное окружение `.venv`, ставит в него зависимости
+(глобальный Python не трогается) и собирает один файл `dist\FarZone-<версия>.exe`
+по `FarZone.spec` (в spec включены `theme.qss`, иконки и шрифты `qtawesome`).
+Версия берётся из `far_zone/__init__.py` (`__version__`) и показывается в
+заголовке окна.
 
-Вручную:
+Вручную (в активированном venv):
 ```bat
 pip install -r requirements.txt
 pyinstaller --noconfirm --clean FarZone.spec
@@ -104,7 +108,7 @@ pyinstaller --noconfirm --clean FarZone.spec
 - **Не открывается / пустой график темы** — проверьте, что рядом с
   `far_zone/app_style.py` есть папка `styles/` с `theme.qss` и `icons/`.
 - **Иконки-квадраты в собранном .exe** — в `FarZone.spec` уже включён
-  `collect_data_files('qtawesome')`; пересоберите `build.bat --clean`.
+  `collect_data_files('qtawesome')`; пересоберите `python build.py --clean`.
 - **«Не удалось загрузить данные из папки»** — в папке должны быть `Beam№*.xlsx`
   и `scan_params.json`.
 - **Долгий расчёт / много памяти** — уменьшите число точек БПФ или шаг сетки.
@@ -112,7 +116,7 @@ pyinstaller --noconfirm --clean FarZone.spec
 ## Структура проекта
 ```
 main.py                  точка входа
-build.bat / run.bat      сборка .exe / быстрый запуск
+build.py                 сборка .exe в изолированном venv
 FarZone.spec             конфиг PyInstaller
 requirements.txt
 far_zone/
