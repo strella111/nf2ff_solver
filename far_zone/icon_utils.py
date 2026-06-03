@@ -40,12 +40,12 @@ ICON_ALIASES = {
     'trash': 'fa5s.trash-alt',
     'cursor-v': 'fa5s.ruler-vertical',
     'cursor-h': 'fa5s.ruler-horizontal',
-    'autoscale': 'fa5s.expand-arrows-alt',
+    'autoscale': 'mdi6.fit-to-page-outline',
     'normalize': 'fa5s.wave-square',
     'csv': 'fa5s.file-csv',
     'png': 'fa5s.image',
-    'max-global': 'fa5s.mountain',
-    'max-local': 'fa5s.search-location',
+    'max-global': 'mdi6.summit',
+    'max-local': 'mdi6.sine-wave',
 }
 
 

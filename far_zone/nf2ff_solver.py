@@ -311,6 +311,26 @@ def solve_sections(mag_data, phase_data, freq, dx, dy, left_az, right_az, d_az,
     az_phase = np.rad2deg(np.angle(-az_cut_c * 1j))
     el_phase = np.rad2deg(np.angle(-el_cut_c * 1j))
 
+    # Обрезаем нефизичные участки. Спектр определён только в окне k-сетки
+    # (|kx| ≤ π/dx, |ky| ≤ π/dy); за ним интерполятор «прижимается» к краю и
+    # рисует постоянную «полку». Такие углы помечаем NaN — на графике линия
+    # рвётся, оставляя только действительную часть ДН. Граница зависит от
+    # частоты (λ=c/f) и шага сканера: sin(θ_max) = λ/(2·d).
+    kx_lo, kx_hi = kx[0], kx[-1]
+    ky_lo, ky_hi = ky[0], ky[-1]
+
+    def _in_grid(az_pts, el_pts):
+        kxq, kyq = _kq(az_pts, el_pts)
+        return ((kxq >= kx_lo) & (kxq <= kx_hi)
+                & (kyq >= ky_lo) & (kyq <= ky_hi))
+
+    az_valid = _in_grid(az, np.full_like(az, el[row]))
+    el_valid = _in_grid(np.full_like(el, az[col]), el)
+    az_amp = np.where(az_valid, az_amp, np.nan)
+    el_amp = np.where(el_valid, el_amp, np.nan)
+    az_phase = np.where(az_valid, az_phase, np.nan)
+    el_phase = np.where(el_valid, el_phase, np.nan)
+
     return {
         'az_amp': az_amp, 'el_amp': el_amp,
         'az_phase': az_phase, 'el_phase': el_phase,

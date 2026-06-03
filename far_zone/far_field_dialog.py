@@ -386,7 +386,9 @@ class FarFieldPlotPanel(QtWidgets.QWidget):
     def _build_traces(self, trace_defs):
         self._traces = []
         for name, color, axis in trace_defs:
-            curve = pg.PlotDataItem([], [], pen=pg.mkPen(color, width=2.4), name=name)
+            # connect='finite' — рвать линию на NaN (обрезанные нефизичные участки ДН)
+            curve = pg.PlotDataItem([], [], pen=pg.mkPen(color, width=2.4), name=name,
+                                    connect='finite')
             vb = self.vbL if axis == 'L' else self.vbR
             vb.addItem(curve)
             self.legend.addItem(curve, name)
@@ -521,7 +523,8 @@ class FarFieldPlotPanel(QtWidgets.QWidget):
                 continue
             name = f'{label} · {trace["name"]}'
             curve = pg.PlotDataItem(trace['x'].copy(), self._disp(trace).copy(),
-                                    pen=pg.mkPen(color, width=1, style=QtCore.Qt.DotLine), name=name)
+                                    pen=pg.mkPen(color, width=1, style=QtCore.Qt.DotLine), name=name,
+                                    connect='finite')
             trace['vb'].addItem(curve)
             self.legend.addItem(curve, name)
             self._overlays.append([curve, trace['vb'], name])
@@ -564,8 +567,11 @@ class FarFieldPlotPanel(QtWidgets.QWidget):
         amps = self._visible_amp_traces()
         if not amps or self._mask_db is None:
             return None
-        top = max(float(np.max(self._disp(t))) for t in amps)
-        return top + self._mask_db
+        tops = [float(np.nanmax(d)) for d in (self._disp(t) for t in amps)
+                if np.any(np.isfinite(d))]
+        if not tops:
+            return None
+        return max(tops) + self._mask_db
 
     def _refresh_mask(self):
         level = self._mask_level()
@@ -648,7 +654,9 @@ class FarFieldPlotPanel(QtWidgets.QWidget):
         y0 = -3.0
         vis = self._visible_amp_traces()
         if vis:
-            y0 = float(np.max(self._disp(vis[0]))) - 3.0
+            d0 = self._disp(vis[0])
+            if np.any(np.isfinite(d0)):
+                y0 = float(np.nanmax(d0)) - 3.0
         line = pg.InfiniteLine(pos=y0, angle=0, movable=True,
                                pen=pg.mkPen(MARKER_H_COLOR, width=MARKER_WIDTH, style=QtCore.Qt.DashLine),
                                label='{value:0.2f}', labelOpts={'position': 0.95, 'color': MARKER_H_COLOR})
@@ -698,7 +706,9 @@ class FarFieldPlotPanel(QtWidgets.QWidget):
         best_x, best_y = None, None
         for trace in self._visible_amp_traces():
             disp = self._disp(trace)
-            i = int(np.argmax(disp))
+            if not np.any(np.isfinite(disp)):
+                continue
+            i = int(np.nanargmax(disp))
             if best_y is None or disp[i] > best_y:
                 best_y, best_x = float(disp[i]), float(trace['x'][i])
         if best_x is not None:
@@ -775,6 +785,8 @@ class FarFieldPlotPanel(QtWidgets.QWidget):
         out = []
         for trace in self._visible_traces():
             y = float(np.interp(x0, trace['x'], self._disp(trace)))
+            if not np.isfinite(y):     # обрезанный участок ДН — нет значения
+                continue
             out.append({'x': x0, 'y': y, 'axis': trace['axis'], 'color': trace['color'],
                         'label': f'{y:.2f} {trace["unit"]}', 'summary': f"{trace['name']}={y:.2f}"})
         return out
@@ -792,8 +804,8 @@ class FarFieldPlotPanel(QtWidgets.QWidget):
                 if len(xs) >= 2:
                     summ += f" (Δ={max(xs) - min(xs):.2f}°)"
                 out[-1]['summary'] = f"{trace['name']}: {summ}"
-            else:
-                i = int(np.argmin(np.abs(disp - level)))
+            elif np.any(np.isfinite(disp)):
+                i = int(np.nanargmin(np.abs(disp - level)))
                 out.append({'x': float(trace['x'][i]), 'y': float(disp[i]), 'axis': 'L',
                             'color': trace['color'], 'label': f'≈{trace["x"][i]:.2f}°',
                             'summary': f"{trace['name']}: ≈{trace['x'][i]:.2f}° (нет пересеч.)"})
@@ -1548,9 +1560,9 @@ class FarFieldDialog(QtWidgets.QDialog):
         """Ширина главного лепестка по уровню −3 дБ (линейная интерполяция краёв)."""
         x = np.asarray(x, dtype=float)
         amp = np.asarray(amp, dtype=float)
-        if amp.size < 3:
+        if amp.size < 3 or not np.any(np.isfinite(amp)):
             return None
-        peak = int(np.argmax(amp))
+        peak = int(np.nanargmax(amp))
         level = amp[peak] - 3.0
 
         def edge(rng):
