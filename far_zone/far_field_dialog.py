@@ -2,9 +2,11 @@
 """Утилита расчёта диаграммы направленности в дальней зоне (NF -> FF).
 
 Вход — папка с результатами режима «Измерение лучей АФАР» (Beam№*.xlsx +
-scan_params.json). После открытия папки вызывается окно параметров (диапазоны,
-шаг, dx/dy, выбор лучей и частот). Выбранные лучи/частоты считаются в фоне,
-результаты кэшируются — переключение мгновенное.
+scan_params.json) ЛИБО отдельный файл измерения (кнопка «Открыть файл»). После
+открытия вызывается окно параметров (диапазоны, шаг, dx/dy, выбор лучей и частот).
+В режиме одиночного файла роль «луча» играет имя файла, а dx/dy задаются вручную.
+Выбранные лучи/частоты считаются в фоне, результаты кэшируются — переключение
+мгновенное.
 
 Амплитуда и фаза показываются НА ОДНОМ графике: 4 трассы (Az/El × амплитуда/
 фаза), две оси Y — слева амплитуда (дБ), справа фаза (°). Любую трассу можно
@@ -25,7 +27,7 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 from loguru import logger
 
 from .nf2ff_solver import solve_sections, find_peak_indices, side_lobe_level
-from .beam_loader import load_beam_pattern_results
+from .beam_loader import load_beam_pattern_results, load_single_beam_file, BeamFileFormatError
 from .beam_mapping import beam_to_angles
 from .icon_utils import set_button_icon, app_icon
 from .design_tokens import ACCENT, STATUS_ICON
@@ -49,11 +51,12 @@ def angle_axis(left, right, step):
 class FarFieldParamsDialog(QtWidgets.QDialog):
     """Параметры пересчёта + выбор лучей и частот."""
 
-    def __init__(self, beams, freqs, defaults=None, parent=None):
+    def __init__(self, beams, freqs, defaults=None, single_file=False, parent=None):
         super().__init__(parent)
         self.setWindowTitle('Параметры пересчёта')
         self.setMinimumWidth(560)
         defaults = defaults or {}
+        self._single_file = single_file
 
         root = QtWidgets.QVBoxLayout(self)
         root.setSpacing(10)
@@ -118,7 +121,10 @@ class FarFieldParamsDialog(QtWidgets.QDialog):
         root.addWidget(params_group)
 
         lists_row = QtWidgets.QHBoxLayout()
-        beams_group, self.beams_list = self._build_check_list('Лучи', beams, lambda b: f'Луч {b}')
+        if single_file:
+            beams_group, self.beams_list = self._build_check_list('Файл', beams, lambda b: str(b))
+        else:
+            beams_group, self.beams_list = self._build_check_list('Лучи', beams, lambda b: f'Луч {b}')
         freqs_group, self.freqs_list = self._build_check_list('Частоты', freqs, lambda f: f'{f:g} МГц')
         lists_row.addWidget(beams_group)
         lists_row.addWidget(freqs_group)
@@ -214,7 +220,10 @@ class FarFieldParamsDialog(QtWidgets.QDialog):
             QtWidgets.QMessageBox.warning(self, 'Проверьте диапазоны', '«от» должно быть меньше «до» по Az и El.')
             return
         if not self.selected_beams():
-            QtWidgets.QMessageBox.warning(self, 'Нет лучей', 'Выберите хотя бы один луч.')
+            if self._single_file:
+                QtWidgets.QMessageBox.warning(self, 'Нет файла', 'Отметьте файл для пересчёта.')
+            else:
+                QtWidgets.QMessageBox.warning(self, 'Нет лучей', 'Выберите хотя бы один луч.')
             return
         if not self.selected_freqs():
             QtWidgets.QMessageBox.warning(self, 'Нет частот', 'Выберите хотя бы одну частоту.')
@@ -927,6 +936,7 @@ class FarFieldDialog(QtWidgets.QDialog):
 
         self._result = None
         self._folder = None
+        self._single_file_mode = False
         self._beams = []
         self._freqs = []
         self._computed_beams = []
@@ -1029,6 +1039,13 @@ class FarFieldDialog(QtWidgets.QDialog):
         self.open_btn.clicked.connect(self.open_folder)
         bar.addWidget(self.open_btn)
 
+        self.open_file_btn = QtWidgets.QPushButton('Открыть файл')
+        set_button_icon(self.open_file_btn, 'folder-open')
+        self.open_file_btn.setToolTip('Открыть отдельный файл измерения (Beam№*.xlsx) для пересчёта; '
+                                      'параметры (шаг dx/dy и др.) задаются вручную')
+        self.open_file_btn.clicked.connect(self.open_file)
+        bar.addWidget(self.open_file_btn)
+
         self.params_btn = QtWidgets.QPushButton('Параметры…')
         set_button_icon(self.params_btn, 'settings')
         self.params_btn.setToolTip('Изменить параметры пересчёта и набор лучей/частот')
@@ -1054,7 +1071,8 @@ class FarFieldDialog(QtWidgets.QDialog):
         self.clear_overlays_btn.setEnabled(False)
         bar.addWidget(self.clear_overlays_btn)
 
-        bar.addWidget(QtWidgets.QLabel('Луч:'))
+        self.beam_kind_label = QtWidgets.QLabel('Луч:')
+        bar.addWidget(self.beam_kind_label)
         self.beam_prev_btn = self._nav_button('back', 'Предыдущий луч  [←]', self._beam_prev,
                                               QtGui.QKeySequence(QtCore.Qt.Key_Left))
         bar.addWidget(self.beam_prev_btn)
@@ -1183,6 +1201,13 @@ class FarFieldDialog(QtWidgets.QDialog):
         return lbl
 
     # --------------------------------------------------------------- Поток
+    def _busy_warn(self):
+        if self._worker is not None:
+            QtWidgets.QMessageBox.information(self, 'Идёт расчёт',
+                                             'Дождитесь окончания текущего расчёта или отмените его.')
+            return True
+        return False
+
     def open_folder(self):
         folder = QtWidgets.QFileDialog.getExistingDirectory(
             self, 'Выберите папку с результатами сканирования лучей', self._last_folder())
@@ -1190,61 +1215,108 @@ class FarFieldDialog(QtWidgets.QDialog):
             return
         self._load_folder(folder)
 
+    def open_file(self):
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, 'Выберите файл для пересчёта',
+            self._last_folder(), 'Все файлы (*);;Файлы измерений (*.xlsx)')
+        if not path:
+            return
+        self._load_file(path)
+
     # ------------------------------------------------------- Drag-and-drop
     @staticmethod
-    def _dropped_dir(mime):
+    def _dropped_target(mime):
+        """Вернуть ('dir', path) для папки или ('file', path) для любого файла.
+
+        Любой файл принимаем — корректность формата проверит загрузчик.
+        """
         for url in mime.urls():
             if url.isLocalFile():
                 path = url.toLocalFile()
                 if os.path.isdir(path):
-                    return path
+                    return 'dir', path
+                if os.path.isfile(path):
+                    return 'file', path
         return None
 
     def dragEnterEvent(self, event):
-        if event.mimeData().hasUrls() and self._dropped_dir(event.mimeData()):
+        if event.mimeData().hasUrls() and self._dropped_target(event.mimeData()):
             event.acceptProposedAction()
         else:
             event.ignore()
 
     def dropEvent(self, event):
-        path = self._dropped_dir(event.mimeData()) if event.mimeData().hasUrls() else None
-        if not path:
+        target = self._dropped_target(event.mimeData()) if event.mimeData().hasUrls() else None
+        if not target:
             event.ignore()
             return
         event.acceptProposedAction()
-        self._load_folder(path)
+        kind, path = target
+        if kind == 'dir':
+            self._load_folder(path)
+        else:
+            self._load_file(path)
 
     def _load_folder(self, folder):
-        if self._worker is not None:
-            QtWidgets.QMessageBox.information(self, 'Идёт расчёт',
-                                             'Дождитесь окончания текущего расчёта или отмените его.')
+        if self._busy_warn():
             return
         result = load_beam_pattern_results(folder)
         if not result or not result.get('data'):
             QtWidgets.QMessageBox.warning(self, 'Ошибка', 'Не удалось загрузить данные из выбранной папки.')
             return
-
-        self._result = result
-        self._folder = folder
         self._set_last_folder(folder)
+        try:
+            step = (float(result.get('step_x', 1.0)), float(result.get('step_y', 1.0)))
+        except (TypeError, ValueError):
+            step = (1.0, 1.0)
+        self._apply_result(result, folder, single_file=False, scan_step=step)
+
+    def _load_file(self, path):
+        if self._busy_warn():
+            return
+        try:
+            result = load_single_beam_file(path)
+        except BeamFileFormatError as exc:
+            QtWidgets.QMessageBox.warning(
+                self, 'Неподходящий файл',
+                f'{os.path.basename(path)}\n\n{exc}')
+            return
+        except Exception as exc:
+            logger.error(f'Ошибка чтения файла {path}: {exc}', exc_info=True)
+            QtWidgets.QMessageBox.critical(
+                self, 'Ошибка', f'Не удалось прочитать файл:\n{exc}')
+            return
+        self._set_last_folder(os.path.dirname(path))
+        self._apply_result(result, path, single_file=True, scan_step=None)
+
+    def _apply_result(self, result, source, single_file, scan_step):
+        """Применить загруженный набор данных (папка или одиночный файл)."""
+        self._result = result
+        self._folder = source
+        self._single_file_mode = single_file
         self._beams = sorted(result['data'].keys())
         self._freqs = list(result.get('freq_list') or [])
         if not self._freqs and self._beams:
             self._freqs = sorted(result['data'][self._beams[0]].keys())
 
-        self.folder_label.setText(os.path.basename(folder.rstrip('/\\')) or folder)
-        self.folder_label.setToolTip(folder)
+        self.folder_label.setText(os.path.basename(source.rstrip('/\\')) or source)
+        self.folder_label.setToolTip(source)
+        self.beam_kind_label.setText('Файл:' if single_file else 'Луч:')
         self.params_btn.setEnabled(True)
-        try:
-            self._default_step = (float(result.get('step_x', 1.0)), float(result.get('step_y', 1.0)))
-        except (TypeError, ValueError):
-            self._default_step = (1.0, 1.0)
-        # Запомненные диапазоны/шаги/БПФ сохраняем, но dx/dy берём из шага скана.
+
         if self._params is None:
             self._params = {}
-        self._params['dx'], self._params['dy'] = self._default_step
+        if single_file:
+            # Шаг сканера неизвестен — dx/dy вводятся вручную (берём прошлые или 1.0).
+            self._default_step = (float(self._params.get('dx', 1.0)),
+                                  float(self._params.get('dy', 1.0)))
+        else:
+            # Запомненные диапазоны/шаги/БПФ сохраняем, но dx/dy берём из шага скана.
+            self._default_step = scan_step
+            self._params['dx'], self._params['dy'] = self._default_step
 
-        logger.info(f'Загружено лучей: {len(self._beams)}, частот: {len(self._freqs)} из {folder}')
+        kind = 'файл' if single_file else 'лучей'
+        logger.info(f'Загружено {kind}: {len(self._beams)}, частот: {len(self._freqs)} из {source}')
         self.open_params()
 
     def open_params(self):
@@ -1253,7 +1325,8 @@ class FarFieldDialog(QtWidgets.QDialog):
         defaults = dict(self._params) if self._params else {}
         defaults.setdefault('dx', self._default_step[0])
         defaults.setdefault('dy', self._default_step[1])
-        dlg = FarFieldParamsDialog(self._beams, self._freqs, defaults=defaults, parent=self)
+        dlg = FarFieldParamsDialog(self._beams, self._freqs, defaults=defaults,
+                                   single_file=self._single_file_mode, parent=self)
         if dlg.exec_() != QtWidgets.QDialog.Accepted:
             return
         self._params = dlg.params()
@@ -1338,6 +1411,7 @@ class FarFieldDialog(QtWidgets.QDialog):
         self.cancel_btn.setVisible(busy)
         self.cancel_btn.setEnabled(busy)
         self.open_btn.setEnabled(not busy)
+        self.open_file_btn.setEnabled(not busy)
         self.params_btn.setEnabled(not busy and self._result is not None)
         for w in (self.beam_combo, self.freq_combo, self.beam_prev_btn,
                   self.beam_next_btn, self.freq_prev_btn, self.freq_next_btn):
@@ -1378,7 +1452,8 @@ class FarFieldDialog(QtWidgets.QDialog):
         beam, freq = self._current_beam_freq()
         if beam is None:
             return ''
-        return f'Луч {beam} / {freq:g} МГц'
+        prefix = '' if self._single_file_mode else 'Луч '
+        return f'{prefix}{beam} / {freq:g} МГц'
 
     # ----------------------------------------------------------- Отрисовка
     def _display_current(self):
