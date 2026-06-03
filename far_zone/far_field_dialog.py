@@ -1041,8 +1041,9 @@ class FarFieldDialog(QtWidgets.QDialog):
 
         self.open_file_btn = QtWidgets.QPushButton('Открыть файл')
         set_button_icon(self.open_file_btn, 'folder-open')
-        self.open_file_btn.setToolTip('Открыть отдельный файл измерения (Beam№*.xlsx) для пересчёта; '
-                                      'параметры (шаг dx/dy и др.) задаются вручную')
+        self.open_file_btn.setToolTip('Открыть отдельный файл измерения для пересчёта '
+                                      '(имя любое — важен формат внутри); '
+                                      'шаг dx/dy и др. задаются вручную')
         self.open_file_btn.clicked.connect(self.open_file)
         bar.addWidget(self.open_file_btn)
 

@@ -327,9 +327,9 @@ def load_single_beam_file(file_path: str) -> dict:
     except Exception as e:
         logger.warning(f"Не удалось открыть как Excel: {file_path}: {e}")
         raise BeamFileFormatError(
-            'Не удалось открыть файл как Excel (.xlsx).\n'
-            'Ожидается файл измерения Beam№*.xlsx из режима '
-            '«Измерение лучей АФАР».') from e
+            'Не удалось открыть файл как таблицу Excel (.xlsx).\n'
+            'Имя файла может быть любым, но внутри должен быть формат '
+            'измерения (как у файлов из режима «Измерение лучей АФАР»).') from e
 
     sheet = workbook.active
     if sheet is None:
@@ -338,8 +338,9 @@ def load_single_beam_file(file_path: str) -> dict:
     freq_list = _detect_freqs(sheet)
     if not freq_list:
         raise BeamFileFormatError(
-            'Это не похоже на файл измерения: не найдены строки «Frequency».\n'
-            'Откройте Beam№*.xlsx из режима «Измерение лучей АФАР».')
+            'Файл не похож на измерение: не найдены строки «Frequency».\n'
+            'Имя файла роли не играет — важен формат данных внутри '
+            '(как в режиме «Измерение лучей АФАР»).')
 
     layout = _detect_layout(sheet, freq_list)
     if layout is None:
