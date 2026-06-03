@@ -8,6 +8,7 @@ import sys
 
 from PyQt5 import QtCore, QtWidgets
 
+from far_zone import __version__
 from far_zone.app_style import apply_app_theme
 from far_zone.far_field_dialog import FarFieldDialog
 
@@ -19,7 +20,7 @@ def main():
     apply_app_theme(app)
 
     win = FarFieldDialog()
-    win.setWindowTitle('Дальняя зона (расчёт ДН)')
+    win.setWindowTitle(f'Дальняя зона (расчёт ДН) v{__version__}')
     win.show()
     sys.exit(app.exec_())
 

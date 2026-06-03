@@ -6,6 +6,8 @@
 """
 from PyInstaller.utils.hooks import collect_data_files
 
+from far_zone import __version__
+
 # Тема (theme.qss + иконки) и шрифты иконок qtawesome
 datas = [('far_zone/styles', 'far_zone/styles')]
 datas += collect_data_files('qtawesome')
@@ -29,7 +31,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='FarZone',
+    name=f'FarZone-{__version__}',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

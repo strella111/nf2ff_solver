@@ -3,20 +3,23 @@
 """Сборка FarZone в один .exe внутри изолированного venv.
 
 Запуск:
-    python build.py            # обычная сборка
-    python build.py --clean    # пересоздать venv с нуля
+    python build.py              # сборка с текущей версией
+    python build.py 1.2.0        # задать версию и собрать
+    python build.py 1.2.0 --clean  # + пересоздать venv с нуля
 
 Что делает скрипт:
-    1. Создаёт виртуальное окружение .venv (если его ещё нет).
-    2. Ставит зависимости из requirements.txt ТОЛЬКО в это окружение
+    1. (опц.) Записывает переданную версию в far_zone/__init__.py.
+    2. Создаёт виртуальное окружение .venv (если его ещё нет).
+    3. Ставит зависимости из requirements.txt ТОЛЬКО в это окружение
        (глобальный Python не трогается).
-    3. Запускает PyInstaller из venv по FarZone.spec.
+    4. Запускает PyInstaller из venv по FarZone.spec.
 
-Результат: dist/FarZone.exe
+Результат: dist/FarZone-<версия>.exe
 """
 from __future__ import annotations
 
 import argparse
+import re
 import shutil
 import subprocess
 import sys
@@ -26,6 +29,8 @@ ROOT = Path(__file__).resolve().parent
 VENV_DIR = ROOT / ".venv"
 REQUIREMENTS = ROOT / "requirements.txt"
 SPEC = ROOT / "FarZone.spec"
+INIT_PY = ROOT / "far_zone" / "__init__.py"
+_VERSION_RE = re.compile(r"""^__version__\s*=\s*['"]([^'"]+)['"]""", re.MULTILINE)
 
 
 def venv_python() -> Path:
@@ -42,6 +47,23 @@ def run(cmd: list[str | Path]) -> None:
     result = subprocess.run([str(c) for c in cmd], cwd=ROOT)
     if result.returncode != 0:
         sys.exit(f"*** ОШИБКА: команда завершилась с кодом {result.returncode} ***")
+
+
+def read_version() -> str:
+    m = _VERSION_RE.search(INIT_PY.read_text(encoding="utf-8"))
+    if not m:
+        sys.exit(f"Не найден __version__ в {INIT_PY}")
+    return m.group(1)
+
+
+def set_version(version: str) -> None:
+    """Записать новую версию в far_zone/__init__.py."""
+    text = INIT_PY.read_text(encoding="utf-8")
+    if not _VERSION_RE.search(text):
+        sys.exit(f"Не найден __version__ в {INIT_PY}")
+    new_text = _VERSION_RE.sub(f"__version__ = '{version}'", text, count=1)
+    INIT_PY.write_text(new_text, encoding="utf-8")
+    print(f"[*] Версия установлена: {version}")
 
 
 def ensure_venv(clean: bool) -> None:
@@ -71,6 +93,11 @@ def build() -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Сборка FarZone в .exe через venv.")
     parser.add_argument(
+        "version",
+        nargs="?",
+        help="версия для сборки, напр. 1.2.0 (по умолчанию берётся из far_zone/__init__.py)",
+    )
+    parser.add_argument(
         "--clean",
         action="store_true",
         help="пересоздать .venv с нуля перед сборкой",
@@ -82,11 +109,16 @@ def main() -> None:
     if not SPEC.exists():
         sys.exit(f"Не найден {SPEC}")
 
+    if args.version:
+        set_version(args.version)
+    version = read_version()
+    print(f"[*] Сборка версии {version}")
+
     ensure_venv(clean=args.clean)
     install_deps()
     build()
 
-    print("\n=== Готово: dist/FarZone.exe ===")
+    print(f"\n=== Готово: dist/FarZone-{version}.exe ===")
 
 
 if __name__ == "__main__":
