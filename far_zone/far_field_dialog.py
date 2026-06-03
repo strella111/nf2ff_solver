@@ -37,6 +37,11 @@ EL_COLOR = '#059669'
 PHASE_AZ_COLOR = STATUS_ICON['fail']   # красный
 PHASE_EL_COLOR = '#d97706'             # янтарный
 MASK_COLOR = '#dc2626'                 # линия маски УБЛ
+MARKER_V_COLOR = '#111827'             # обычный вертикальный маркер
+MARKER_H_COLOR = '#7c3aed'             # обычный горизонтальный маркер
+PEAK_COLOR = '#db2777'                 # маркер поиска максимума (магнитится к пикам)
+MARKER_WIDTH = 1.8                     # толщина линии маркеров (была 1)
+PEAK_WIDTH = 2.4                       # маркер-максимум чуть толще обычных
 DEG = np.pi / 180
 OVERLAY_COLORS = ['#7c3aed', '#0891b2', '#d97706', '#475467', '#e11d48', '#059669', '#2563eb']
 STEP_TO_M = 1e-2  # шаг сканера: см -> метры
@@ -434,8 +439,10 @@ class FarFieldPlotPanel(QtWidgets.QWidget):
 
         col.addWidget(self._icon_btn('cursor-h', 'Добавить горизонтальный маркер (по амплитуде)', self._add_hcursor, shortcut='H'))
         col.addWidget(self._icon_btn('cursor-v', 'Добавить вертикальный маркер', self._add_vcursor, shortcut='V'))
-        col.addWidget(self._icon_btn('max-global', 'Поиск максимума: маркер в главный максимум амплитуды', self._marker_to_max, shortcut='M'))
-        col.addWidget(self._icon_btn('max-local', 'Поиск локальных максимумов амплитуды (следующий по кругу)', self._next_local_max, shortcut='Shift+M'))
+        col.addWidget(self._icon_btn('max-global', 'Маркер максимума (отдельный цвет): в главный максимум амплитуды.\n'
+                                                   'Перетаскивание маркера притягивается к ближайшему максимуму', self._marker_to_max, shortcut='M'))
+        col.addWidget(self._icon_btn('max-local', 'Маркер максимума: следующий локальный максимум по кругу.\n'
+                                                  'Перетаскивание маркера притягивается к ближайшему максимуму', self._next_local_max, shortcut='Shift+M'))
         col.addWidget(self._icon_btn('autoscale', 'Автомасштаб по данным', self.autoscale, shortcut='A'))
         self.norm_btn = self._icon_btn('normalize', 'Нормировка амплитуды к максимуму (дБ)', self._toggle_norm, checkable=True, shortcut='N')
         self.norm_btn.setChecked(self._normalize)
@@ -602,22 +609,30 @@ class FarFieldPlotPanel(QtWidgets.QWidget):
         vb.addItem(dots, ignoreBounds=True)
         return dots
 
-    def _new_cursor_record(self, line, kind):
-        color = '#111827' if kind == 'v' else '#7c3aed'
+    def _new_cursor_record(self, line, kind, peak=False):
+        if peak:
+            color = PEAK_COLOR
+        else:
+            color = MARKER_V_COLOR if kind == 'v' else MARKER_H_COLOR
         return {
-            'line': line, 'kind': kind,
+            'line': line, 'kind': kind, 'peak': peak,
             'dotsL': self._make_dots(self.vbL, color),
             'dotsR': self._make_dots(self.vbR, color),
             'labelsL': [], 'labelsR': [],
         }
 
-    def _make_vcursor(self, x):
+    def _make_vcursor(self, x, peak=False):
+        color = PEAK_COLOR if peak else MARKER_V_COLOR
+        width = PEAK_WIDTH if peak else MARKER_WIDTH
         line = pg.InfiniteLine(pos=x, angle=90, movable=True,
-                               pen=pg.mkPen('#111827', width=1, style=QtCore.Qt.DashLine),
-                               label='{value:0.2f}°', labelOpts={'position': 0.97, 'color': '#111827'})
+                               pen=pg.mkPen(color, width=width, style=QtCore.Qt.DashLine),
+                               label='{value:0.2f}°', labelOpts={'position': 0.97, 'color': color})
         line.sigPositionChanged.connect(self._update_intersections)
+        if peak:
+            # Маркер поиска максимума «магнитится» к локальным максимумам при сдвиге.
+            line.sigDragged.connect(self._snap_peak_to_nearest)
         self.plot.addItem(line)
-        cur = self._new_cursor_record(line, 'v')
+        cur = self._new_cursor_record(line, 'v', peak=peak)
         self._cursors.append(cur)
         return cur
 
@@ -635,8 +650,8 @@ class FarFieldPlotPanel(QtWidgets.QWidget):
         if vis:
             y0 = float(np.max(self._disp(vis[0]))) - 3.0
         line = pg.InfiniteLine(pos=y0, angle=0, movable=True,
-                               pen=pg.mkPen('#7c3aed', width=1, style=QtCore.Qt.DashLine),
-                               label='{value:0.2f}', labelOpts={'position': 0.95, 'color': '#7c3aed'})
+                               pen=pg.mkPen(MARKER_H_COLOR, width=MARKER_WIDTH, style=QtCore.Qt.DashLine),
+                               label='{value:0.2f}', labelOpts={'position': 0.95, 'color': MARKER_H_COLOR})
         line.sigPositionChanged.connect(self._update_intersections)
         self.plot.addItem(line)
         self._cursors.append(self._new_cursor_record(line, 'h'))
@@ -647,10 +662,32 @@ class FarFieldPlotPanel(QtWidgets.QWidget):
     # скройте вторую амплитудную трассу тумблером справа сверху.
     def _peak_vcursor(self, x):
         if self._peak_cursor is None or self._peak_cursor not in self._cursors:
-            self._peak_cursor = self._make_vcursor(x)
+            self._peak_cursor = self._make_vcursor(x, peak=True)
         else:
             self._peak_cursor['line'].setValue(x)
         self._update_intersections()
+
+    def _local_max_angles(self):
+        """Отсортированные углы (°) всех локальных максимумов видимых амплитуд."""
+        angles = []
+        for trace in self._visible_amp_traces():
+            for p in find_peak_indices(self._disp(trace)):
+                angles.append(float(trace['x'][p]))
+        if not angles:
+            return []
+        return sorted(set(round(a, 6) for a in angles))
+
+    def _snap_peak_to_nearest(self):
+        """Притянуть маркер-максимум к ближайшему локальному максимуму (магнит)."""
+        if self._peak_cursor is None or self._peak_cursor not in self._cursors:
+            return
+        angles = self._local_max_angles()
+        if not angles:
+            return
+        x = float(self._peak_cursor['line'].value())
+        nearest = min(angles, key=lambda a: abs(a - x))
+        if abs(nearest - x) > 1e-9:
+            self._peak_cursor['line'].setValue(nearest)
 
     def _peak_cursor_x(self):
         if self._peak_cursor is not None and self._peak_cursor in self._cursors:
@@ -668,13 +705,9 @@ class FarFieldPlotPanel(QtWidgets.QWidget):
             self._peak_vcursor(best_x)
 
     def _next_local_max(self):
-        angles = []
-        for trace in self._visible_amp_traces():
-            for p in find_peak_indices(self._disp(trace)):
-                angles.append(float(trace['x'][p]))
+        angles = self._local_max_angles()
         if not angles:
             return
-        angles = sorted(set(round(a, 6) for a in angles))
         cur_x = self._peak_cursor_x()
         nxt = [a for a in angles if a > cur_x + 1e-6]
         self._peak_vcursor(nxt[0] if nxt else angles[0])
