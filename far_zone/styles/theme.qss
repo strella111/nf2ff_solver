@@ -317,6 +317,11 @@ QToolButton[navButton="true"] {
     border-radius: 6px;
 }
 
+QToolButton[plotTool="true"] {
+    padding: 0;
+    border-radius: 6px;
+}
+
 QToolButton#autoScrollButton {
     min-height: 26px;
     padding: 2px 8px;

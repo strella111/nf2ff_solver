@@ -411,6 +411,7 @@ class FarFieldPlotPanel(QtWidgets.QWidget):
     # --------------------------------------------------- инструменты (слева)
     def _icon_btn(self, icon, tip, slot, checkable=False, shortcut=None):
         btn = QtWidgets.QToolButton()
+        btn.setProperty('plotTool', True)
         btn.setIcon(app_icon(icon))
         btn.setIconSize(QtCore.QSize(18, 18))
         if shortcut:
@@ -1040,7 +1041,7 @@ class FarFieldDialog(QtWidgets.QDialog):
         bar.addWidget(self.open_btn)
 
         self.open_file_btn = QtWidgets.QPushButton('Открыть файл')
-        set_button_icon(self.open_file_btn, 'folder-open')
+        set_button_icon(self.open_file_btn, 'file-open')
         self.open_file_btn.setToolTip('Открыть отдельный файл измерения для пересчёта '
                                       '(имя любое — важен формат внутри); '
                                       'шаг dx/dy и др. задаются вручную')
@@ -1059,14 +1060,14 @@ class FarFieldDialog(QtWidgets.QDialog):
         bar.addWidget(self.folder_label, 1)
 
         self.hold_btn = QtWidgets.QPushButton('Закрепить')
-        set_button_icon(self.hold_btn, 'copy')
+        set_button_icon(self.hold_btn, 'pin')
         self.hold_btn.setToolTip('Закрепить текущие трассы для сравнения')
         self.hold_btn.clicked.connect(self._hold_traces)
         self.hold_btn.setEnabled(False)
         bar.addWidget(self.hold_btn)
 
         self.clear_overlays_btn = QtWidgets.QPushButton('Очистить нал.')
-        set_button_icon(self.clear_overlays_btn, 'trash')
+        set_button_icon(self.clear_overlays_btn, 'eraser')
         self.clear_overlays_btn.setToolTip('Убрать закреплённые трассы')
         self.clear_overlays_btn.clicked.connect(self._clear_overlays)
         self.clear_overlays_btn.setEnabled(False)
@@ -1177,7 +1178,7 @@ class FarFieldDialog(QtWidgets.QDialog):
         layout.addStretch(1)
 
         self.export_table_btn = QtWidgets.QPushButton('Экспорт таблицы метрик…')
-        set_button_icon(self.export_table_btn, 'save')
+        set_button_icon(self.export_table_btn, 'export')
         self.export_table_btn.setToolTip('Сохранить метрики всех рассчитанных лучей и частот в Excel или CSV')
         self.export_table_btn.clicked.connect(self._export_metrics_table)
         self.export_table_btn.setEnabled(False)
