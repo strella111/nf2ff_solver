@@ -1,7 +1,29 @@
 from pathlib import Path
 import sys
 
+from PyQt5 import QtGui
+
 from .design_tokens import qss_substitutions
+
+
+def reserve_bold_width(button):
+    """Заложить в ширину кнопки ЖИРНЫЙ текст выбранного состояния.
+
+    Тема делает выбранную кнопку жирной (``QToolButton:checked``,
+    ``font-weight: 600`` — в Qt5 это Bold), а размер кнопки посчитан по
+    обычному начертанию. Из-за этого текст влезал, пока кнопка не выбрана, и
+    обрезался сразу после выбора. Меряем подсказку размера жирным шрифтом и
+    фиксируем её как минимальную ширину — тогда размер от состояния не зависит.
+
+    Вызывать после того, как у кнопки заданы текст и иконка.
+    """
+    normal = button.font()
+    bold = QtGui.QFont(normal)
+    bold.setBold(True)
+    button.setFont(bold)
+    width = button.sizeHint().width()
+    button.setFont(normal)
+    button.setMinimumWidth(width)
 
 
 def _theme_path_candidates():

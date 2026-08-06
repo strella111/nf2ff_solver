@@ -36,6 +36,7 @@ from .beam_loader import (load_beam_pattern_results, load_single_beam_file,
                           BeamFileFormatError, LoadCancelled)
 from .beam_mapping import beam_to_angles
 from .near_field_panel import NearFieldPanel
+from .app_style import reserve_bold_width
 from .icon_utils import set_button_icon, app_icon
 from .design_tokens import ACCENT, STATUS_ICON
 
@@ -537,6 +538,7 @@ class FarFieldPlotPanel(QtWidgets.QWidget):
             btn.setToolTip(f'Показать/скрыть «{name}»')
             btn.setStyleSheet(f'QToolButton:checked {{ color: {color}; font-weight: 600; }}')
             btn.clicked.connect(lambda _=False, n=name: self._toggle_trace(n))
+            reserve_bold_width(btn)   # выбранный тумблер жирный — иначе текст обрежется
             bar.addWidget(btn)
             self._vis_btns[name] = btn
         return bar
@@ -1213,6 +1215,8 @@ class FarFieldDialog(QtWidgets.QDialog):
         bar.addWidget(self.beam_prev_btn)
         self.beam_combo = QtWidgets.QComboBox()
         self.beam_combo.setMinimumWidth(90)
+        # Рядом с номером луча показываются его углы — ширины под номер мало.
+        self.beam_combo.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToContents)
         self.beam_combo.currentIndexChanged.connect(self._on_selection_changed)
         bar.addWidget(self.beam_combo)
         self.beam_next_btn = self._nav_button('forward', 'Следующий луч  [→]', self._beam_next,
@@ -1243,6 +1247,7 @@ class FarFieldDialog(QtWidgets.QDialog):
         btn.setAutoExclusive(False)   # переключаем вручную: вид может не смениться
         btn.setToolTip(tooltip)
         btn.clicked.connect(lambda _=False, v=view: self._set_view(v))
+        reserve_bold_width(btn)       # выбранная кнопка жирная — иначе текст обрежется
         return btn
 
     def _nav_button(self, icon, tooltip, slot, shortcut=None):
@@ -1279,19 +1284,29 @@ class FarFieldDialog(QtWidgets.QDialog):
         self.near_group = QtWidgets.QGroupBox('Ближнее поле')
         n = QtWidgets.QFormLayout(self.near_group)
         n.setContentsMargins(12, 12, 12, 12)
+        self.lbl_nf_angles = self._metric()
         self.lbl_nf_max = self._metric()
         self.lbl_nf_pos = self._metric()
         self.lbl_nf_dyn = self._metric()
         self.lbl_nf_phase = self._metric()
         self.lbl_nf_points = self._metric()
         self.lbl_nf_size = self._metric()
+        n.addRow('Задан. α/β, °:', self.lbl_nf_angles)
         n.addRow('Максимум, дБ:', self.lbl_nf_max)
-        n.addRow('Координата макс. X/Y, см:', self.lbl_nf_pos)
-        n.addRow('Размах амплитуды, дБ:', self.lbl_nf_dyn)
+        n.addRow('Макс. в точке X/Y, см:', self.lbl_nf_pos)
+        n.addRow('Размах ампл., дБ:', self.lbl_nf_dyn)
         n.addRow('Размах фазы, °:', self.lbl_nf_phase)
         n.addRow('Измерено точек:', self.lbl_nf_points)
         n.addRow('Апертура X×Y, см:', self.lbl_nf_size)
         layout.addWidget(self.near_group)
+
+        # Сведения о самом скане: строки собираются по факту наличия данных,
+        # поэтому у одиночного файла (без scan_params.json) группа почти пуста.
+        self.scan_group = QtWidgets.QGroupBox('Параметры скана')
+        self.scan_form = QtWidgets.QFormLayout(self.scan_group)
+        self.scan_form.setContentsMargins(12, 12, 12, 12)
+        self.scan_form.setFieldGrowthPolicy(QtWidgets.QFormLayout.AllNonFixedFieldsGrow)
+        layout.addWidget(self.scan_group)
 
         metrics_group = QtWidgets.QGroupBox('Результаты')
         self.metrics_group = metrics_group
@@ -1750,6 +1765,7 @@ class FarFieldDialog(QtWidgets.QDialog):
         far = self._view == 'far'
         computed = bool(self._cache)
         self.near_group.setVisible(not far)
+        self.scan_group.setVisible(not far and self.scan_form.rowCount() > 0)
         self.metrics_group.setVisible(far)
         self.mask_group.setVisible(far)
         self.hold_btn.setEnabled(far and computed)
@@ -1772,7 +1788,7 @@ class FarFieldDialog(QtWidgets.QDialog):
         try:
             self._view_beams, self._view_freqs = beams, freqs
             self.beam_combo.clear()
-            self.beam_combo.addItems([str(b) for b in beams])
+            self.beam_combo.addItems([self._beam_item_text(b) for b in beams])
             self.freq_combo.clear()
             self.freq_combo.addItems([f'{f:g}' for f in freqs])
             self.beam_combo.setCurrentIndex(self._index_of(beams, prev_beam))
@@ -1793,12 +1809,32 @@ class FarFieldDialog(QtWidgets.QDialog):
                     return i
         return 0 if values else -1
 
+    # ------------------------------------------------------- Луч и его углы
+    def _beam_angles(self, beam):
+        """(α, β) луча в градусах или None (в режиме файла луча нет)."""
+        if self._single_file_mode or beam is None:
+            return None
+        try:
+            mapping = beam_to_angles(int(beam))
+            return float(mapping.alpha), float(mapping.beta)
+        except Exception:
+            return None
+
+    def _beam_item_text(self, beam):
+        """Номер луча вместе с углами отклонения — для списка выбора."""
+        angles = self._beam_angles(beam)
+        if angles is None:
+            return str(beam)
+        return f'{beam}  ·  α={angles[0]:.2f} β={angles[1]:.2f}'
+
     def _current_label(self):
         beam, freq = self._current_beam_freq()
         if beam is None:
             return ''
         prefix = '' if self._single_file_mode else 'Луч '
-        return f'{prefix}{beam} / {freq:g} МГц'
+        angles = self._beam_angles(beam)
+        suffix = '' if angles is None else f' (α={angles[0]:.2f}° β={angles[1]:.2f}°)'
+        return f'{prefix}{beam}{suffix} / {freq:g} МГц'
 
     # ----------------------------------------------------------- Отрисовка
     def _display_current(self):
@@ -1825,6 +1861,7 @@ class FarFieldDialog(QtWidgets.QDialog):
         if not field:
             self.near_panel.clear_data()
             self._update_near_metrics(None)
+            self._update_scan_info(beam)
             return
         dx, dy = self._near_step()
         stats = self.near_panel.set_field(
@@ -1832,14 +1869,124 @@ class FarFieldDialog(QtWidgets.QDialog):
             self._result.get('x_list'), self._result.get('y_list'),
             dx, dy, label=self._current_label())
         self._update_near_metrics(stats)
+        self._update_scan_info(beam)
+
+    # --------------------------------------------------- Сведения о скане
+    def _beam_file(self, beam):
+        """Файл текущего луча в папке скана или None, если его нет."""
+        if self._single_file_mode:
+            path = (self._result or {}).get('file_path')
+            return path if path and os.path.isfile(path) else None
+        folder = self._result.get('save_dir') or self._folder
+        if not folder or beam is None:
+            return None
+        path = os.path.join(str(folder), f'Beam№{beam}.xlsx')
+        return path if os.path.isfile(path) else None
+
+    def _scan_info_rows(self, beam):
+        """Пары (подпись, значение) о скане — только те, что есть в данных."""
+        result = self._result or {}
+        rows = []
+
+        path = self._beam_file(beam)
+        if path:
+            rows.append(('Файл:', os.path.basename(path)))
+
+        def span(lo_key, hi_key):
+            lo, hi = result.get(lo_key), result.get(hi_key)
+            if lo is None or hi is None:
+                return None
+            return f'{float(lo):g} … {float(hi):g}'
+
+        x_span = span('left_x', 'right_x')
+        if x_span:
+            rows.append(('Область X, см:', x_span))
+        y_span = span('up_y', 'down_y')
+        if y_span:
+            rows.append(('Область Y, см:', y_span))
+
+        if result.get('step_x') is not None and result.get('step_y') is not None:
+            rows.append(('Шаг X/Y, см:',
+                         f"{float(result['step_x']):g} / {float(result['step_y']):g}"))
+
+        freqs = result.get('freq_list') or []
+        if freqs:
+            rows.append(('Частоты, МГц:', ', '.join(f'{float(f):g}' for f in freqs)))
+
+        rows += self._pna_info_rows(result.get('pna_settings'))
+        rows += self._sync_info_rows(result.get('sync_settings'))
+        return rows
+
+    @staticmethod
+    def _pna_info_rows(pna):
+        """Строки о настройках PNA (частоты в Гц, импульсы в секундах)."""
+        if not isinstance(pna, dict) or not pna:
+            return []
+        rows = []
+        head = []
+        if pna.get('s_param'):
+            head.append(str(pna['s_param']))
+        if pna.get('power') is not None:
+            head.append(f"{float(pna['power']):g} дБм")
+        if head:
+            rows.append(('PNA:', ', '.join(head)))
+
+        start, stop = pna.get('freq_start'), pna.get('freq_stop')
+        if start is not None and stop is not None:
+            text = f'{float(start) / 1e6:g} … {float(stop) / 1e6:g} МГц'
+            if pna.get('freq_points'):
+                text += f", точек: {int(pna['freq_points'])}"
+            rows.append(('Диапазон PNA:', text))
+
+        if pna.get('pulse_mode'):
+            pulse = [str(pna['pulse_mode'])]
+            if pna.get('pulse_period') is not None:
+                pulse.append(f"период {float(pna['pulse_period']) * 1e6:g} мкс")
+            if pna.get('pulse_width') is not None:
+                pulse.append(f"ширина {float(pna['pulse_width']) * 1e6:g} мкс")
+            rows.append(('Импульс:', ', '.join(pulse)))
+        return rows
+
+    @staticmethod
+    def _sync_info_rows(sync):
+        """Строки о синхронизаторе (времена хранятся в секундах)."""
+        if not isinstance(sync, dict) or not sync:
+            return []
+        parts = []
+        if sync.get('trig_ttl_channel'):
+            parts.append(f"канал {sync['trig_ttl_channel']}")
+        if sync.get('trig_start_lead') is not None:
+            parts.append(f"опережение {float(sync['trig_start_lead']) * 1e3:g} мс")
+        if sync.get('trig_pulse_period') is not None:
+            parts.append(f"период {float(sync['trig_pulse_period']) * 1e6:g} мкс")
+        return [('Синхронизатор:', ', '.join(parts))] if parts else []
+
+    def _update_scan_info(self, beam=None):
+        """Перестроить блок «Параметры скана» под текущие данные."""
+        rows = self._scan_info_rows(beam) if self._result else []
+        while self.scan_form.rowCount():
+            self.scan_form.removeRow(0)
+        for title, value in rows:
+            lbl = self._metric()
+            lbl.setText(value)
+            lbl.setWordWrap(True)   # панель узкая, длинные значения переносим
+            self.scan_form.addRow(title, lbl)
+        # Пустую группу не показываем: у одиночного файла сведений может не быть.
+        self.scan_group.setVisible(bool(rows) and self._view == 'near')
 
     def _update_near_metrics(self, stats):
-        labels = (self.lbl_nf_max, self.lbl_nf_pos, self.lbl_nf_dyn,
-                  self.lbl_nf_phase, self.lbl_nf_points, self.lbl_nf_size)
+        labels = (self.lbl_nf_angles, self.lbl_nf_max, self.lbl_nf_pos,
+                  self.lbl_nf_dyn, self.lbl_nf_phase, self.lbl_nf_points,
+                  self.lbl_nf_size)
         if not stats:
             for lbl in labels:
                 lbl.setText('—')
             return
+
+        beam, _freq = self._current_beam_freq()
+        angles = self._beam_angles(beam)
+        self.lbl_nf_angles.setText(
+            '—' if angles is None else f'{angles[0]:.2f} / {angles[1]:.2f}')
 
         def num(value, fmt='{:.2f}'):
             return '—' if value is None else fmt.format(value)
@@ -1949,7 +2096,9 @@ class FarFieldDialog(QtWidgets.QDialog):
         self.lbl_phase_max.setText(f"{entry['phase_max']:.2f}")
         try:
             mapping = beam_to_angles(int(beam))
-            self.lbl_set_angle.setText(f'α={mapping.alpha:g} / β={mapping.beta:g}')
+            # Без префиксов «α=/β=»: их называет подпись строки, а панель узкая
+            # (300 px) — с префиксами β не влезала и обрезалась.
+            self.lbl_set_angle.setText(f'{mapping.alpha:.2f} / {mapping.beta:.2f}')
         except Exception:
             self.lbl_set_angle.setText('—')
 

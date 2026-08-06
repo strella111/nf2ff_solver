@@ -18,6 +18,7 @@ import pyqtgraph.exporters  # noqa: F401  (регистрирует pg.exporters
 from PyQt5 import QtCore, QtGui, QtWidgets
 from loguru import logger
 
+from .app_style import reserve_bold_width
 from .editable_colorbar import EditableColorBarItem, prompt_colorbar_range
 from .icon_utils import app_icon
 from .near_field_data import (PHASE_LEVELS, auto_levels, axis_points,
@@ -134,6 +135,7 @@ class NearFieldPanel(QtWidgets.QWidget):
             btn.setToolTip(f'{MODES[mode]["title"]}, {MODES[mode]["units"]}')
             btn.setChecked(mode == self._mode)
             btn.clicked.connect(lambda _=False, m=mode: self.set_mode(m))
+            reserve_bold_width(btn)   # выбранная кнопка жирная — иначе текст обрежется
             self._mode_group.addButton(btn)
             bar.addWidget(btn)
             setattr(self, f'_{mode}_btn', btn)
