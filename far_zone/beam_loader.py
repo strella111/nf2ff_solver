@@ -13,13 +13,66 @@ from openpyxl import load_workbook
 from typing import Optional
 
 
-def load_beam_pattern_results(save_dir: str) -> Optional[dict]:
+class LoadCancelled(Exception):
+    """Загрузка прервана пользователем — это не ошибка данных."""
+
+
+class _Progress:
+    """Ход загрузки: доля выполнения 0..1 + текст, с проверкой отмены.
+
+    on_progress(frac, text) — куда сообщать; frac=None означает «идёт длинная
+    операция, доля неизвестна» (разбор книги Excel целиком).
+    is_cancelled() — True, если пользователь нажал «Отмена».
+    part() выделяет вложенный отчёт под подзадачу, которая занимает часть
+    общего диапазона (например, один файл луча из сорока).
+    """
+
+    def __init__(self, on_progress=None, is_cancelled=None, lo=0.0, hi=1.0):
+        self._on_progress = on_progress
+        self._is_cancelled = is_cancelled
+        self._lo = lo
+        self._hi = hi
+
+    def check(self):
+        """Прервать загрузку, если пользователь нажал «Отмена»."""
+        if self._is_cancelled is not None and self._is_cancelled():
+            raise LoadCancelled()
+
+    def emit(self, frac, text):
+        """Сообщить долю выполнения внутри своего диапазона (frac ∈ 0..1)."""
+        self.check()
+        if self._on_progress is None:
+            return
+        if frac is None:
+            self._on_progress(None, text)
+            return
+        frac = min(max(float(frac), 0.0), 1.0)
+        self._on_progress(self._lo + (self._hi - self._lo) * frac, text)
+
+    def busy(self, text):
+        """Длинная операция без измеримой доли (открытие книги Excel)."""
+        self.emit(None, text)
+
+    def part(self, frac_from, frac_to):
+        """Вложенный отчёт для подзадачи, занимающей часть диапазона."""
+        span = self._hi - self._lo
+        return _Progress(self._on_progress, self._is_cancelled,
+                         self._lo + span * frac_from, self._lo + span * frac_to)
+
+
+def load_beam_pattern_results(save_dir: str, on_progress=None,
+                              is_cancelled=None) -> Optional[dict]:
     """
     Загружает результаты измерения лучей из Excel файлов для досканирования
-    
+
     Args:
         save_dir: Путь к папке с результатами (base_dir/luchi/{дата})
-        
+        on_progress: callback(frac, text) — ход загрузки (frac ∈ 0..1 или None)
+        is_cancelled: callback() -> bool — пользователь нажал «Отмена»
+
+    Raises:
+        LoadCancelled — загрузка прервана пользователем.
+
     Returns:
         dict: {
             'beams': [список лучей],
@@ -31,11 +84,13 @@ def load_beam_pattern_results(save_dir: str) -> Optional[dict]:
             'step_y': шаг по Y
         } или None при ошибке
     """
+    root = _Progress(on_progress, is_cancelled)
     try:
         if not os.path.exists(save_dir):
             logger.error(f"Папка не найдена: {save_dir}")
             return None
 
+        root.emit(0.0, 'Поиск файлов измерения…')
         params_file = os.path.join(save_dir, 'scan_params.json')
         loaded_params = None
         if os.path.exists(params_file):
@@ -79,10 +134,13 @@ def load_beam_pattern_results(save_dir: str) -> Optional[dict]:
             step_y = 1.0
         
         # Загружаем данные из первого файла для определения структуры
+        n_files = len(beam_files)
         first_beam_num, first_file = beam_files[0]
+        root.emit(0.0, f'Открытие файла 1 из {n_files}…')
         workbook = load_workbook(first_file)
         sheet = workbook.active
-        
+        root.emit(0.0, 'Разбор структуры файла…')
+
         # Если частоты не загружены из JSON, определяем из файла
         if not freq_list:
             # Ищем все частоты
@@ -144,11 +202,13 @@ def load_beam_pattern_results(save_dir: str) -> Optional[dict]:
                     phase_start_row = row
                     break
             if phase_start_row:
-                # phase_start_row = first_freq_row + 3 + len_x
-                len_x = phase_start_row - first_freq_row - 3
+                # Заголовок 'Phase' идёт сразу за блоком амплитуды:
+                # phase_start_row = first_freq_row + 2 + len_x
+                len_x = phase_start_row - first_freq_row - 2
             else:
-                # Если не нашли Phase, используем общую формулу
-                len_x = (sheet.max_row - first_freq_row - 3) // 2
+                # Если не нашли Phase, считаем по последней строке листа:
+                # max_row = first_freq_row + 2 + len_x * 2
+                len_x = (sheet.max_row - first_freq_row - 2) // 2
         
         size_freq_data = 3 + len_x * 2
         
@@ -160,11 +220,18 @@ def load_beam_pattern_results(save_dir: str) -> Optional[dict]:
         
         # Загружаем данные для всех лучей
         data = {}
-        for beam_num, file_path in beam_files:
-            workbook = load_workbook(file_path)
-            sheet = workbook.active
+        for idx, (beam_num, file_path) in enumerate(beam_files):
+            part = root.part(idx / n_files, (idx + 1) / n_files)
+            label = f'Луч {beam_num} ({idx + 1}/{n_files})'
+            if idx == 0:
+                beam_sheet = sheet  # первый файл уже открыт при разборе структуры
+            else:
+                part.emit(0.0, f'{label} — открытие файла…')
+                beam_sheet = load_workbook(file_path).active
             data[beam_num] = _read_sheet_data(
-                sheet, freq_list, len_x, len_y, size_freq_data, x_list, y_list)
+                beam_sheet, freq_list, len_x, len_y, size_freq_data, x_list, y_list,
+                progress=part, label=label)
+        root.emit(1.0, 'Загрузка завершена')
 
         logger.info(f"Загружены данные: {len(beams)} лучей, {len(freq_list)} частот, {len_x}x{len_y} точек")
         
@@ -190,7 +257,10 @@ def load_beam_pattern_results(save_dir: str) -> Optional[dict]:
             result['sync_settings'] = loaded_params.get('sync_settings')
         
         return result
-        
+
+    except LoadCancelled:
+        logger.info(f"Загрузка папки отменена пользователем: {save_dir}")
+        raise
     except Exception as e:
         logger.error(f"Ошибка при загрузке результатов измерения лучей: {e}", exc_info=True)
         return None
@@ -245,26 +315,45 @@ def _detect_layout(sheet, freq_list) -> Optional[tuple]:
                 phase_start_row = row
                 break
         if phase_start_row:
-            len_x = phase_start_row - first_freq_row - 3
+            # Заголовок 'Phase' идёт сразу за блоком амплитуды:
+            # phase_start_row = first_freq_row + 2 + len_x
+            len_x = phase_start_row - first_freq_row - 2
         else:
-            len_x = (sheet.max_row - first_freq_row - 3) // 2
+            # max_row = first_freq_row + 2 + len_x * 2
+            len_x = (sheet.max_row - first_freq_row - 2) // 2
 
     size_freq_data = 3 + len_x * 2
     return len_x, len_y, size_freq_data
 
 
-def _read_sheet_data(sheet, freq_list, len_x, len_y, size_freq_data, x_list, y_list) -> dict:
+def _read_sheet_data(sheet, freq_list, len_x, len_y, size_freq_data, x_list, y_list,
+                     progress=None, label='') -> dict:
     """Прочитать амплитуду и фазу по всем частотам с одного листа.
+
+    progress — необязательный отчёт о ходе чтения (доля 0..1 внутри листа);
+    он же проверяет отмену, поэтому длинное чтение можно прервать.
 
     Returns: {freq: {'x', 'y', 'amp', 'phase'}}.
     """
     data = {}
+    n_freq = max(len(freq_list), 1)
+    n_rows = max(len_x, 1)
+
+    def tick(freq, freq_idx, half, x_idx):
+        """Доля: частоты × две половины блока (half=0 — амплитуда, 1 — фаза)."""
+        if progress is None or x_idx % 8:
+            return
+        frac = (freq_idx + (half + x_idx / n_rows) / 2) / n_freq
+        text = f'{freq:g} МГц' if not label else f'{label} — {freq:g} МГц'
+        progress.emit(frac, text)
+
     for freq_idx, freq in enumerate(freq_list):
         row_start = freq_idx * size_freq_data + 1
         amp_2d = np.full((len_y, len_x), np.nan)
         phase_2d = np.full((len_y, len_x), np.nan)
 
         for x_idx in range(len_x):
+            tick(freq, freq_idx, 0, x_idx)
             for y_idx in range(len_y):
                 cell = sheet.cell(row_start + 2 + x_idx, y_idx + 1)
                 if cell.value is not None:
@@ -274,6 +363,7 @@ def _read_sheet_data(sheet, freq_list, len_x, len_y, size_freq_data, x_list, y_l
                         pass
 
         for x_idx in range(len_x):
+            tick(freq, freq_idx, 1, x_idx)
             for y_idx in range(len_y):
                 cell = sheet.cell(row_start + 3 + len_x + x_idx, y_idx + 1)
                 if cell.value is not None:
@@ -298,7 +388,8 @@ class BeamFileFormatError(Exception):
     """
 
 
-def load_single_beam_file(file_path: str) -> dict:
+def load_single_beam_file(file_path: str, on_progress=None,
+                          is_cancelled=None) -> dict:
     """Загрузить ОДИН файл измерения (Beam№*.xlsx) для отдельного пересчёта.
 
     В отличие от load_beam_pattern_results, не требует папки и scan_params.json:
@@ -307,6 +398,9 @@ def load_single_beam_file(file_path: str) -> dict:
 
     Принять можно ЛЮБОЙ файл, но если внутри не тот формат — поднимается
     BeamFileFormatError с понятным сообщением (что именно не так).
+
+    on_progress(frac, text) — ход загрузки (frac ∈ 0..1 или None, если доля
+    неизвестна); is_cancelled() -> bool — пользователь нажал «Отмена».
 
     Returns: {
         'name': имя файла без расширения (роль «луча»),
@@ -318,9 +412,15 @@ def load_single_beam_file(file_path: str) -> dict:
     Raises:
         BeamFileFormatError — файл не открывается как .xlsx или не содержит
         ожидаемой структуры измерения.
+        LoadCancelled — загрузка прервана пользователем.
     """
     if not os.path.isfile(file_path):
         raise BeamFileFormatError(f'Файл не найден:\n{file_path}')
+
+    progress = _Progress(on_progress, is_cancelled)
+    # Разбор книги идёт внутри openpyxl одним куском — доля неизвестна, поэтому
+    # полоса на это время «бегущая», а не процентная.
+    progress.busy(f'Открытие файла {os.path.basename(file_path)}…')
 
     try:
         workbook = load_workbook(file_path)
@@ -335,6 +435,7 @@ def load_single_beam_file(file_path: str) -> dict:
     if sheet is None:
         raise BeamFileFormatError('В книге Excel нет активного листа с данными.')
 
+    progress.busy('Разбор структуры файла…')
     freq_list = _detect_freqs(sheet)
     if not freq_list:
         raise BeamFileFormatError(
@@ -355,7 +456,9 @@ def load_single_beam_file(file_path: str) -> dict:
     x_list = list(range(len_x))
     y_list = list(range(len_y))
     data_by_freq = _read_sheet_data(
-        sheet, freq_list, len_x, len_y, size_freq_data, x_list, y_list)
+        sheet, freq_list, len_x, len_y, size_freq_data, x_list, y_list,
+        progress=progress, label='Чтение данных')
+    progress.emit(1.0, 'Загрузка завершена')
 
     # Должны быть хоть какие-то числовые значения амплитуды.
     has_amp = any(

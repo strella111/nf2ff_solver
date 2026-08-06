@@ -46,6 +46,10 @@ ICON_ALIASES = {
     'png': 'fa5s.image',
     'max-global': 'mdi6.summit',
     'max-local': 'mdi6.sine-wave',
+    'aspect': 'mdi6.aspect-ratio',
+    'near-field': 'mdi6.grid',
+    'far-field': 'fa5s.chart-line',
+    'recalc': 'fa5s.calculator',
 }
 
 

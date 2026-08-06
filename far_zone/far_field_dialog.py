@@ -2,15 +2,20 @@
 """Утилита расчёта диаграммы направленности в дальней зоне (NF -> FF).
 
 Вход — папка с результатами режима «Измерение лучей АФАР» (Beam№*.xlsx +
-scan_params.json) ЛИБО отдельный файл измерения (кнопка «Открыть файл»). После
-открытия вызывается окно параметров (диапазоны, шаг, dx/dy, выбор лучей и частот).
+scan_params.json) ЛИБО отдельный файл измерения (кнопка «Открыть файл»).
 В режиме одиночного файла роль «луча» играет имя файла, а dx/dy задаются вручную.
-Выбранные лучи/частоты считаются в фоне, результаты кэшируются — переключение
-мгновенное.
 
-Амплитуда и фаза показываются НА ОДНОМ графике: 4 трассы (Az/El × амплитуда/
-фаза), две оси Y — слева амплитуда (дБ), справа фаза (°). Любую трассу можно
-скрыть тумблером. Поддержка: значение при наведении, перетаскиваемые линии-
+Два вида, переключаются кнопками в верхней панели:
+- «Ближнее поле» — 2D-карта измеренного поля (амплитуда или фаза по апертуре);
+  доступна сразу после загрузки, см. near_field_panel;
+- «Главные сечения ДН» — дальняя зона; включается только после пересчёта
+  (кнопка «Пересчитать…» -> окно параметров -> фоновый счёт с кэшем).
+Луч и частота переключаются общими комбобоксами: в ближнем поле доступно всё
+загруженное, в дальней зоне — только рассчитанное.
+
+В дальней зоне амплитуда и фаза показываются НА ОДНОМ графике: 4 трассы (Az/El ×
+амплитуда/фаза), две оси Y — слева амплитуда (дБ), справа фаза (°). Любую трассу
+можно скрыть тумблером. Поддержка: значение при наведении, перетаскиваемые линии-
 маркеры V/H со значениями на пересечении, наложение трасс, нормировка (только
 амплитуда), поиск максимумов (только амплитуда), экспорт PNG/CSV.
 
@@ -27,8 +32,10 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 from loguru import logger
 
 from .nf2ff_solver import solve_sections, find_peak_indices, side_lobe_level
-from .beam_loader import load_beam_pattern_results, load_single_beam_file, BeamFileFormatError
+from .beam_loader import (load_beam_pattern_results, load_single_beam_file,
+                          BeamFileFormatError, LoadCancelled)
 from .beam_mapping import beam_to_angles
+from .near_field_panel import NearFieldPanel
 from .icon_utils import set_button_icon, app_icon
 from .design_tokens import ACCENT, STATUS_ICON
 
@@ -234,6 +241,66 @@ class FarFieldParamsDialog(QtWidgets.QDialog):
             QtWidgets.QMessageBox.warning(self, 'Нет частот', 'Выберите хотя бы одну частоту.')
             return
         super().accept()
+
+
+# ============================================================ Фоновая загрузка
+class _LoadWorker(QtCore.QObject):
+    """Чтение Excel в отдельном потоке: окно не «замирает», виден прогресс.
+
+    Разбор книги openpyxl занимает секунды-минуты, поэтому загрузка вынесена из
+    UI-потока, а загрузчику передаются callback'и прогресса и отмены.
+    """
+
+    progress = QtCore.pyqtSignal(int, str)   # промилле (0..1000), -1 — доля неизвестна
+    finished = QtCore.pyqtSignal(object)     # результат загрузчика
+    failed = QtCore.pyqtSignal(str, str)     # заголовок окна, текст
+    cancelled = QtCore.pyqtSignal()
+    done = QtCore.pyqtSignal()
+
+    def __init__(self, kind, path):
+        super().__init__()
+        self.kind = kind            # 'dir' — папка лучей, 'file' — один файл
+        self.path = path
+        self._stop = False
+        self._last = None           # последнее отправленное (промилле, текст)
+
+    def stop(self):
+        self._stop = True
+
+    def _on_progress(self, frac, text):
+        """Отсеять повторы: тиков много, а полосе нужны только изменения."""
+        permille = -1 if frac is None else int(round(frac * 1000))
+        if (permille, text) == self._last:
+            return
+        self._last = (permille, text)
+        self.progress.emit(permille, text)
+
+    @QtCore.pyqtSlot()
+    def run(self):
+        try:
+            if self.kind == 'dir':
+                result = load_beam_pattern_results(
+                    self.path, on_progress=self._on_progress,
+                    is_cancelled=lambda: self._stop)
+                if not result or not result.get('data'):
+                    self.failed.emit('Ошибка',
+                                     'Не удалось загрузить данные из выбранной папки.')
+                    return
+            else:
+                result = load_single_beam_file(
+                    self.path, on_progress=self._on_progress,
+                    is_cancelled=lambda: self._stop)
+            self.finished.emit(result)
+        except LoadCancelled:
+            self.cancelled.emit()
+        except BeamFileFormatError as exc:
+            self.failed.emit('Неподходящий файл',
+                             f'{os.path.basename(self.path)}\n\n{exc}')
+        except Exception as exc:
+            logger.error(f'Ошибка чтения {self.path}: {exc}', exc_info=True)
+            self.failed.emit('Ошибка', f'Не удалось прочитать данные:\n{exc}')
+        finally:
+            self.done.emit()
 
 
 # ================================================================ Фоновый счёт
@@ -987,6 +1054,9 @@ class FarFieldDialog(QtWidgets.QDialog):
         self._freqs = []
         self._computed_beams = []
         self._computed_freqs = []
+        self._view = 'near'         # 'near' — ближнее поле, 'far' — сечения ДН
+        self._view_beams = []       # что сейчас в комбобоксах (зависит от вида)
+        self._view_freqs = []
         self._cache = {}
         self._params = self._load_saved_params()
         self._default_step = (1.0, 1.0)
@@ -995,6 +1065,11 @@ class FarFieldDialog(QtWidgets.QDialog):
         self._updating = False
         self._thread = None
         self._worker = None
+        self._load_thread = None
+        self._load_worker = None
+        self._loading = None        # (kind, path) текущей загрузки
+        self._pending_load = None   # итог загрузки, применяется после остановки потока
+        self._closing = False       # окно ждёт остановки потоков, чтобы закрыться
 
         self._build_ui()
         self._restore_window_state()
@@ -1074,6 +1149,7 @@ class FarFieldDialog(QtWidgets.QDialog):
         body.addWidget(self._build_plots(), 1)
         root.addLayout(body, 1)
         root.addLayout(self._build_progress_bar())
+        self._sync_view_widgets()   # стартуем на ближнем поле: метрики ДН скрыты
 
     def _build_top_bar(self):
         bar = QtWidgets.QHBoxLayout()
@@ -1093,12 +1169,24 @@ class FarFieldDialog(QtWidgets.QDialog):
         self.open_file_btn.clicked.connect(self.open_file)
         bar.addWidget(self.open_file_btn)
 
-        self.params_btn = QtWidgets.QPushButton('Параметры…')
-        set_button_icon(self.params_btn, 'settings')
-        self.params_btn.setToolTip('Изменить параметры пересчёта и набор лучей/частот')
-        self.params_btn.clicked.connect(self.open_params)
-        self.params_btn.setEnabled(False)
-        bar.addWidget(self.params_btn)
+        self.recalc_btn = QtWidgets.QPushButton('Пересчитать…')
+        set_button_icon(self.recalc_btn, 'recalc')
+        self.recalc_btn.setToolTip('Задать параметры пересчёта (диапазоны, dx/dy, лучи, частоты)\n'
+                                   'и посчитать дальнюю зону')
+        self.recalc_btn.clicked.connect(self.open_params)
+        self.recalc_btn.setEnabled(False)
+        bar.addWidget(self.recalc_btn)
+
+        bar.addSpacing(8)
+        self.near_btn = self._view_button('near-field', 'Ближнее поле',
+                                          'Измеренное поле по апертуре (2D)', 'near')
+        self.far_btn = self._view_button('far-field', 'Главные сечения ДН',
+                                         'Диаграмма направленности в дальней зоне.\n'
+                                         'Доступно после пересчёта', 'far')
+        self.near_btn.setChecked(True)
+        self.far_btn.setEnabled(False)
+        bar.addWidget(self.near_btn)
+        bar.addWidget(self.far_btn)
 
         self.folder_label = QtWidgets.QLabel('Папка не выбрана')
         self.folder_label.setObjectName('ffFolderLabel')
@@ -1145,6 +1233,18 @@ class FarFieldDialog(QtWidgets.QDialog):
         bar.addWidget(self.freq_next_btn)
         return bar
 
+    def _view_button(self, icon, text, tooltip, view):
+        """Кнопка выбора вида (ближнее поле / дальняя зона) — как радиокнопка."""
+        btn = QtWidgets.QToolButton()
+        btn.setText(text)
+        btn.setToolButtonStyle(QtCore.Qt.ToolButtonTextBesideIcon)
+        set_button_icon(btn, icon, size=14)
+        btn.setCheckable(True)
+        btn.setAutoExclusive(False)   # переключаем вручную: вид может не смениться
+        btn.setToolTip(tooltip)
+        btn.clicked.connect(lambda _=False, v=view: self._set_view(v))
+        return btn
+
     def _nav_button(self, icon, tooltip, slot, shortcut=None):
         btn = QtWidgets.QToolButton()
         btn.setProperty('navButton', True)
@@ -1164,7 +1264,7 @@ class FarFieldDialog(QtWidgets.QDialog):
         row.addWidget(self.progress, 1)
         self.cancel_btn = QtWidgets.QPushButton('Отмена')
         set_button_icon(self.cancel_btn, 'stop')
-        self.cancel_btn.clicked.connect(self._cancel_compute)
+        self.cancel_btn.clicked.connect(self._cancel_current)
         self.cancel_btn.setVisible(False)
         row.addWidget(self.cancel_btn)
         return row
@@ -1176,7 +1276,25 @@ class FarFieldDialog(QtWidgets.QDialog):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(10)
 
+        self.near_group = QtWidgets.QGroupBox('Ближнее поле')
+        n = QtWidgets.QFormLayout(self.near_group)
+        n.setContentsMargins(12, 12, 12, 12)
+        self.lbl_nf_max = self._metric()
+        self.lbl_nf_pos = self._metric()
+        self.lbl_nf_dyn = self._metric()
+        self.lbl_nf_phase = self._metric()
+        self.lbl_nf_points = self._metric()
+        self.lbl_nf_size = self._metric()
+        n.addRow('Максимум, дБ:', self.lbl_nf_max)
+        n.addRow('Координата макс. X/Y, см:', self.lbl_nf_pos)
+        n.addRow('Размах амплитуды, дБ:', self.lbl_nf_dyn)
+        n.addRow('Размах фазы, °:', self.lbl_nf_phase)
+        n.addRow('Измерено точек:', self.lbl_nf_points)
+        n.addRow('Апертура X×Y, см:', self.lbl_nf_size)
+        layout.addWidget(self.near_group)
+
         metrics_group = QtWidgets.QGroupBox('Результаты')
+        self.metrics_group = metrics_group
         m = QtWidgets.QFormLayout(metrics_group)
         m.setContentsMargins(12, 12, 12, 12)
         self.lbl_max = self._metric()
@@ -1200,6 +1318,7 @@ class FarFieldDialog(QtWidgets.QDialog):
         layout.addWidget(metrics_group)
 
         mask_group = QtWidgets.QGroupBox('Маска УБЛ')
+        self.mask_group = mask_group
         mg = QtWidgets.QGridLayout(mask_group)
         mg.setContentsMargins(12, 10, 12, 10)
         self.mask_check = QtWidgets.QCheckBox('Показать маску')
@@ -1231,14 +1350,19 @@ class FarFieldDialog(QtWidgets.QDialog):
         return panel
 
     def _build_plots(self):
+        self.near_panel = NearFieldPanel()
         self.plot_panel = FarFieldPlotPanel([
             ('Az ампл.', AZ_COLOR, 'L'),
             ('El ампл.', EL_COLOR, 'L'),
             ('Az фаза', PHASE_AZ_COLOR, 'R'),
             ('El фаза', PHASE_EL_COLOR, 'R'),
         ])
-        self.panels = [self.plot_panel]
-        return self.plot_panel
+        self.panels = [self.plot_panel]   # закрепление трасс — только у дальней зоны
+
+        self.stack = QtWidgets.QStackedWidget()
+        self.stack.addWidget(self.near_panel)    # 0 — ближнее поле
+        self.stack.addWidget(self.plot_panel)    # 1 — главные сечения ДН
+        return self.stack
 
     @staticmethod
     def _metric():
@@ -1249,6 +1373,10 @@ class FarFieldDialog(QtWidgets.QDialog):
 
     # --------------------------------------------------------------- Поток
     def _busy_warn(self):
+        if self._load_worker is not None:
+            QtWidgets.QMessageBox.information(self, 'Идёт загрузка',
+                                              'Дождитесь окончания загрузки файлов или отмените её.')
+            return True
         if self._worker is not None:
             QtWidgets.QMessageBox.information(self, 'Идёт расчёт',
                                              'Дождитесь окончания текущего расчёта или отмените его.')
@@ -1305,36 +1433,122 @@ class FarFieldDialog(QtWidgets.QDialog):
             self._load_file(path)
 
     def _load_folder(self, folder):
-        if self._busy_warn():
-            return
-        result = load_beam_pattern_results(folder)
-        if not result or not result.get('data'):
-            QtWidgets.QMessageBox.warning(self, 'Ошибка', 'Не удалось загрузить данные из выбранной папки.')
-            return
-        self._set_last_folder(folder)
-        try:
-            step = (float(result.get('step_x', 1.0)), float(result.get('step_y', 1.0)))
-        except (TypeError, ValueError):
-            step = (1.0, 1.0)
-        self._apply_result(result, folder, single_file=False, scan_step=step)
+        self._start_load('dir', folder)
 
     def _load_file(self, path):
+        self._start_load('file', path)
+
+    # ------------------------------------------------------- Загрузка в фоне
+    def _start_load(self, kind, path):
+        """Читать Excel в фоне: окно живое, видно прогресс и кнопку «Отмена»."""
         if self._busy_warn():
             return
-        try:
-            result = load_single_beam_file(path)
-        except BeamFileFormatError as exc:
-            QtWidgets.QMessageBox.warning(
-                self, 'Неподходящий файл',
-                f'{os.path.basename(path)}\n\n{exc}')
+        self._loading = (kind, path)
+        self._pending_load = None
+        self._set_busy(True)
+        self.progress.setRange(0, 1000)
+        self.progress.setValue(0)
+        self.progress.setFormat('Подготовка…')
+        name = os.path.basename(path.rstrip('/\\')) or path
+        self.folder_label.setText(f'Загрузка: {name}')
+        self.folder_label.setToolTip(path)
+
+        self._load_thread = QtCore.QThread()
+        self._load_worker = _LoadWorker(kind, path)
+        self._load_worker.moveToThread(self._load_thread)
+        self._load_thread.started.connect(self._load_worker.run)
+        self._load_worker.progress.connect(self._on_load_progress)
+        self._load_worker.finished.connect(self._on_load_finished)
+        self._load_worker.failed.connect(self._on_load_failed)
+        self._load_worker.cancelled.connect(self._on_load_cancelled)
+        # Итог показываем только после полной остановки потока (см. _finish_load).
+        self._load_worker.done.connect(self._load_thread.quit)
+        self._load_thread.finished.connect(self._on_load_thread_finished)
+        self._load_thread.start()
+
+    @QtCore.pyqtSlot(int, str)
+    def _on_load_progress(self, permille, text):
+        if permille < 0:
+            if self.progress.maximum() != 0:
+                self.progress.setRange(0, 0)   # «бегущая» полоса: доля неизвестна
+            self.progress.setFormat(text)
             return
-        except Exception as exc:
-            logger.error(f'Ошибка чтения файла {path}: {exc}', exc_info=True)
-            QtWidgets.QMessageBox.critical(
-                self, 'Ошибка', f'Не удалось прочитать файл:\n{exc}')
+        if self.progress.maximum() != 1000:
+            self.progress.setRange(0, 1000)
+        self.progress.setValue(permille)
+        self.progress.setFormat(f'{text}  —  %p%')
+
+    @QtCore.pyqtSlot(object)
+    def _on_load_finished(self, result):
+        self._pending_load = ('ok', result)
+
+    @QtCore.pyqtSlot(str, str)
+    def _on_load_failed(self, title, message):
+        self._pending_load = ('fail', (title, message))
+
+    @QtCore.pyqtSlot()
+    def _on_load_cancelled(self):
+        self._pending_load = ('cancel', None)
+
+    @QtCore.pyqtSlot()
+    def _on_load_thread_finished(self):
+        if self._load_worker is not None:
+            self._load_worker.deleteLater()
+        if self._load_thread is not None:
+            self._load_thread.deleteLater()
+        self._load_worker = None
+        self._load_thread = None
+        if self._closing:
+            self._pending_load = None
+            self._loading = None
+            self._close_if_pending()
             return
-        self._set_last_folder(os.path.dirname(path))
-        self._apply_result(result, path, single_file=True, scan_step=None)
+        self._finish_load()
+
+    def _finish_load(self):
+        """Показать итог загрузки — уже после остановки потока.
+
+        Окно параметров модальное (вложенный цикл событий), поэтому открывать
+        его во время уборки потока нельзя.
+        """
+        pending, self._pending_load = self._pending_load, None
+        loading, self._loading = self._loading, None
+        self._set_busy(False)
+        self.progress.setRange(0, 100)
+
+        if not pending or not loading:
+            self._restore_source_label()
+            return
+        outcome, payload = pending
+        if outcome != 'ok':
+            self._restore_source_label()
+            if outcome == 'fail':
+                title, message = payload
+                QtWidgets.QMessageBox.warning(self, title, message)
+            return
+
+        kind, path = loading
+        result = payload
+        if kind == 'dir':
+            self._set_last_folder(path)
+            try:
+                step = (float(result.get('step_x', 1.0)), float(result.get('step_y', 1.0)))
+            except (TypeError, ValueError):
+                step = (1.0, 1.0)
+            self._apply_result(result, path, single_file=False, scan_step=step)
+        else:
+            self._set_last_folder(os.path.dirname(path))
+            self._apply_result(result, path, single_file=True, scan_step=None)
+
+    def _restore_source_label(self):
+        """Вернуть подпись источника после неудачной или отменённой загрузки."""
+        src = self._folder
+        if src:
+            self.folder_label.setText(os.path.basename(str(src).rstrip('/\\')) or str(src))
+            self.folder_label.setToolTip(str(src))
+        else:
+            self.folder_label.setText('Папка не выбрана')
+            self.folder_label.setToolTip('')
 
     def _apply_result(self, result, source, single_file, scan_step):
         """Применить загруженный набор данных (папка или одиночный файл)."""
@@ -1349,7 +1563,15 @@ class FarFieldDialog(QtWidgets.QDialog):
         self.folder_label.setText(os.path.basename(source.rstrip('/\\')) or source)
         self.folder_label.setToolTip(source)
         self.beam_kind_label.setText('Файл:' if single_file else 'Луч:')
-        self.params_btn.setEnabled(True)
+        self.recalc_btn.setEnabled(True)
+
+        # Новые данные — прежний расчёт к ним не относится: дальняя зона гаснет.
+        self._cache = {}
+        self._computed_beams = []
+        self._computed_freqs = []
+        self.far_btn.setEnabled(False)
+        self.plot_panel.clear_data()
+        self.plot_panel.clear_overlays()
 
         if self._params is None:
             self._params = {}
@@ -1364,7 +1586,8 @@ class FarFieldDialog(QtWidgets.QDialog):
 
         kind = 'файл' if single_file else 'лучей'
         logger.info(f'Загружено {kind}: {len(self._beams)}, частот: {len(self._freqs)} из {source}')
-        self.open_params()
+        # Сразу показываем ближнее поле; пересчёт запускает пользователь кнопкой.
+        self._set_view('near', force=True)
 
     def open_params(self):
         if self._result is None:
@@ -1411,6 +1634,7 @@ class FarFieldDialog(QtWidgets.QDialog):
             self._thread.deleteLater()
         self._worker = None
         self._thread = None
+        self._close_if_pending()
 
     @QtCore.pyqtSlot(int, int, str)
     def _on_progress(self, done, total, msg):
@@ -1423,23 +1647,19 @@ class FarFieldDialog(QtWidgets.QDialog):
             self._cache = cache
             self._set_busy(False)
             if not cache:
+                # Считать нечего — дальняя зона снова гаснет, остаёмся на ближнем поле.
+                self._computed_beams = []
+                self._computed_freqs = []
+                self.far_btn.setEnabled(False)
+                self._set_view('near', force=True)
                 QtWidgets.QMessageBox.information(self, 'Нет результатов',
                                                   'Ни один выбранный луч/частота не содержит данных.')
                 return
-            beams = sorted({b for b, _ in cache.keys()})
-            freqs = sorted({f for _, f in cache.keys()})
-            self._updating = True
-            self.beam_combo.clear()
-            self.beam_combo.addItems([str(b) for b in beams])
-            self.freq_combo.clear()
-            self.freq_combo.addItems([f'{f:g}' for f in freqs])
-            self._computed_beams = beams
-            self._computed_freqs = freqs
-            self._updating = False
-            self.hold_btn.setEnabled(True)
-            self.clear_overlays_btn.setEnabled(True)
-            self.export_table_btn.setEnabled(True)
-            self._display_current()
+            self._computed_beams = sorted({b for b, _ in cache.keys()})
+            self._computed_freqs = sorted({f for _, f in cache.keys()})
+            # Расчёт есть — дальняя зона доступна, и сразу показываем её.
+            self.far_btn.setEnabled(True)
+            self._set_view('far', force=True)
         except Exception:
             logger.exception('Ошибка при отображении результатов расчёта дальней зоны')
 
@@ -1448,9 +1668,17 @@ class FarFieldDialog(QtWidgets.QDialog):
         self._set_busy(False)
         QtWidgets.QMessageBox.critical(self, 'Ошибка расчёта', message)
 
-    def _cancel_compute(self):
+    def _cancel_current(self):
+        """Прервать то, что идёт сейчас: загрузку файлов или расчёт."""
+        stopped = False
+        if self._load_worker is not None:
+            self._load_worker.stop()
+            self.progress.setFormat('Отмена…')
+            stopped = True
         if self._worker is not None:
             self._worker.stop()
+            stopped = True
+        if stopped:
             self.cancel_btn.setEnabled(False)
 
     def _set_busy(self, busy):
@@ -1459,7 +1687,7 @@ class FarFieldDialog(QtWidgets.QDialog):
         self.cancel_btn.setEnabled(busy)
         self.open_btn.setEnabled(not busy)
         self.open_file_btn.setEnabled(not busy)
-        self.params_btn.setEnabled(not busy and self._result is not None)
+        self.recalc_btn.setEnabled(not busy and self._result is not None)
         for w in (self.beam_combo, self.freq_combo, self.beam_prev_btn,
                   self.beam_next_btn, self.freq_prev_btn, self.freq_next_btn):
             w.setEnabled(not busy)
@@ -1491,9 +1719,79 @@ class FarFieldDialog(QtWidgets.QDialog):
     def _current_beam_freq(self):
         b_idx = self.beam_combo.currentIndex()
         f_idx = self.freq_combo.currentIndex()
-        if b_idx < 0 or f_idx < 0:
+        if not (0 <= b_idx < len(self._view_beams)) or not (0 <= f_idx < len(self._view_freqs)):
             return None, None
-        return self._computed_beams[b_idx], self._computed_freqs[f_idx]
+        return self._view_beams[b_idx], self._view_freqs[f_idx]
+
+    # ------------------------------------------------------------ Вид окна
+    def _set_view(self, view, force=False):
+        """Переключить вид: 'near' — ближнее поле, 'far' — главные сечения ДН.
+
+        В дальнюю зону пускаем только когда есть расчёт, иначе показывать нечего.
+        """
+        view = 'far' if view == 'far' else 'near'
+        if view == 'far' and not self._cache:
+            view = 'near'
+        if view == self._view and not force:
+            # Повторный клик по уже выбранной кнопке не должен её «отжимать».
+            self.near_btn.setChecked(view == 'near')
+            self.far_btn.setChecked(view == 'far')
+            return
+        self._view = view
+        self.near_btn.setChecked(view == 'near')
+        self.far_btn.setChecked(view == 'far')
+        self.stack.setCurrentIndex(1 if view == 'far' else 0)
+        self._sync_view_widgets()
+        self._populate_combos()
+        self._display_current()
+
+    def _sync_view_widgets(self):
+        """Показать то, что относится к текущему виду, и скрыть чужое."""
+        far = self._view == 'far'
+        computed = bool(self._cache)
+        self.near_group.setVisible(not far)
+        self.metrics_group.setVisible(far)
+        self.mask_group.setVisible(far)
+        self.hold_btn.setEnabled(far and computed)
+        self.clear_overlays_btn.setEnabled(far and computed)
+        self.export_table_btn.setEnabled(far and computed)
+
+    def _populate_combos(self):
+        """Списки луча/частоты под текущий вид.
+
+        В ближнем поле доступно всё загруженное, в дальней зоне — только
+        рассчитанное (пересчёт часто идёт по части лучей).
+        """
+        prev_beam, prev_freq = self._current_beam_freq()
+        if self._view == 'far':
+            beams, freqs = list(self._computed_beams), list(self._computed_freqs)
+        else:
+            beams, freqs = list(self._beams), list(self._freqs)
+
+        self._updating = True
+        try:
+            self._view_beams, self._view_freqs = beams, freqs
+            self.beam_combo.clear()
+            self.beam_combo.addItems([str(b) for b in beams])
+            self.freq_combo.clear()
+            self.freq_combo.addItems([f'{f:g}' for f in freqs])
+            self.beam_combo.setCurrentIndex(self._index_of(beams, prev_beam))
+            self.freq_combo.setCurrentIndex(self._index_of(freqs, prev_freq))
+        finally:
+            self._updating = False
+
+    @staticmethod
+    def _index_of(values, previous):
+        """Индекс previous в values, иначе первый элемент.
+
+        Выбор сохраняется ПО ЗНАЧЕНИЮ: списки в видах разной длины, и по
+        индексу после переключения оказался бы не тот луч.
+        """
+        if previous is not None:
+            for i, value in enumerate(values):
+                if value == previous:
+                    return i
+        return 0 if values else -1
 
     def _current_label(self):
         beam, freq = self._current_beam_freq()
@@ -1504,6 +1802,64 @@ class FarFieldDialog(QtWidgets.QDialog):
 
     # ----------------------------------------------------------- Отрисовка
     def _display_current(self):
+        if self._view == 'near':
+            self._display_near()
+        else:
+            self._display_far()
+
+    def _near_step(self):
+        """Шаг сканера для осей карты, см: из параметров, иначе из скана."""
+        params = self._params or {}
+        try:
+            return (float(params.get('dx', self._default_step[0])),
+                    float(params.get('dy', self._default_step[1])))
+        except (TypeError, ValueError):
+            return 1.0, 1.0
+
+    def _display_near(self):
+        """Карта ближнего поля выбранного луча/частоты."""
+        beam, freq = self._current_beam_freq()
+        field = None
+        if beam is not None and self._result:
+            field = (self._result.get('data', {}).get(beam) or {}).get(freq)
+        if not field:
+            self.near_panel.clear_data()
+            self._update_near_metrics(None)
+            return
+        dx, dy = self._near_step()
+        stats = self.near_panel.set_field(
+            field['amp'], field['phase'],
+            self._result.get('x_list'), self._result.get('y_list'),
+            dx, dy, label=self._current_label())
+        self._update_near_metrics(stats)
+
+    def _update_near_metrics(self, stats):
+        labels = (self.lbl_nf_max, self.lbl_nf_pos, self.lbl_nf_dyn,
+                  self.lbl_nf_phase, self.lbl_nf_points, self.lbl_nf_size)
+        if not stats:
+            for lbl in labels:
+                lbl.setText('—')
+            return
+
+        def num(value, fmt='{:.2f}'):
+            return '—' if value is None else fmt.format(value)
+
+        self.lbl_nf_max.setText(num(stats['max_db']))
+        if stats['max_x'] is None or stats['max_y'] is None:
+            self.lbl_nf_pos.setText('—')
+        else:
+            self.lbl_nf_pos.setText(f"{stats['max_x']:.1f} / {stats['max_y']:.1f}")
+        self.lbl_nf_dyn.setText(num(stats['dynamic_db']))
+        self.lbl_nf_phase.setText(num(stats['phase_span'], '{:.1f}'))
+        self.lbl_nf_points.setText(f"{stats['measured']} из {stats['total']}")
+        if stats['size_x'] is None or stats['size_y'] is None:
+            self.lbl_nf_size.setText(f"— ({stats['n_x']}×{stats['n_y']} точек)")
+        else:
+            self.lbl_nf_size.setText(
+                f"{stats['size_x']:.1f} × {stats['size_y']:.1f}"
+                f"  ({stats['n_x']}×{stats['n_y']} точек)")
+
+    def _display_far(self):
         beam, freq = self._current_beam_freq()
         if beam is None or freq is None:
             return
@@ -1687,11 +2043,28 @@ class FarFieldDialog(QtWidgets.QDialog):
         wb.save(path)
 
     # ------------------------------------------------------------- Закрытие
+    def _close_if_pending(self):
+        """Закрыть окно, если оно ждало остановки потоков (см. closeEvent)."""
+        if self._closing and self._thread is None and self._load_thread is None:
+            self.close()
+
     def closeEvent(self, event):
+        for worker in (self._worker, self._load_worker):
+            if worker is not None:
+                worker.stop()
+        threads = [t for t in (self._thread, self._load_thread) if t is not None]
+        for thread in threads:
+            thread.quit()
+            thread.wait(2000)
+        if any(t.isRunning() for t in threads):
+            # Разбор книги Excel обрывается не мгновенно. Пока поток жив, окно не
+            # закрываем: иначе Qt роняет приложение («QThread: Destroyed while
+            # thread is still running»). Закроемся сами, как только поток встанет.
+            self._closing = True
+            self.progress.setVisible(True)
+            self.progress.setRange(0, 0)
+            self.progress.setFormat('Завершение работы…')
+            event.ignore()
+            return
         self._save_window_state()
-        if self._worker is not None:
-            self._worker.stop()
-        if self._thread is not None:
-            self._thread.quit()
-            self._thread.wait(2000)
         super().closeEvent(event)
