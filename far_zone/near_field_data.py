@@ -13,7 +13,6 @@
 import numpy as np
 
 PHASE_LEVELS = (-180.0, 180.0)
-DEFAULT_FLOOR_DB = -40.0
 
 
 def field_image(values, flip_x=False, flip_y=False):
@@ -104,32 +103,62 @@ def prepare_maps(amp, phase, x_list, y_list, dx, dy):
     }
 
 
-def amp_display(img, normalize):
-    """Амплитуда к показу: как есть или нормированная к максимуму (0 дБ)."""
-    img = np.asarray(img, dtype=float)
-    if not normalize:
-        return img
-    finite = img[np.isfinite(img)]
-    if finite.size == 0:
-        return img
-    return img - float(finite.max())
+def auto_levels(img):
+    """Пределы шкалы по данным: ``(min, max)`` измеренных точек.
 
-
-def amp_levels(img, floor_db=DEFAULT_FLOOR_DB):
-    """Пределы цветовой шкалы амплитуды ``(низ, верх)``, дБ.
-
-    Низ ограничен ``floor_db`` от максимума: одна «провальная» точка не должна
-    съедать весь контраст картинки.
+    Так же, как в «Измерении лучей АФАР»: без «пола» и нормировки — что
+    измерено, то и в шкале. Вырожденный случай (все значения равны) немного
+    раздвигается, иначе шкала схлопывается.
     """
     img = np.asarray(img, dtype=float)
     finite = img[np.isfinite(img)]
     if finite.size == 0:
-        return float(floor_db), 0.0
-    hi = float(finite.max())
-    lo = max(float(finite.min()), hi + float(floor_db))
+        return 0.0, 1.0
+    lo, hi = float(finite.min()), float(finite.max())
     if hi - lo < 1e-9:
-        lo = hi - 1.0
+        hi = lo + 1e-6
     return lo, hi
+
+
+def expand_span(lo, hi, min_span, pad):
+    """Расширить отрезок до минимальной ширины и добавить поля по краям."""
+    lo, hi = lo - pad, hi + pad
+    if hi - lo < min_span:
+        center = (lo + hi) / 2
+        lo, hi = center - min_span / 2, center + min_span / 2
+    return lo, hi
+
+
+def measured_bounds(amp_img, x_pts, y_pts):
+    """Границы измеренных точек ``(x0, x1, y0, y1)`` для подгонки масштаба.
+
+    ``amp_img`` — картинка ``(x, y)``. Если измеренных точек нет, берётся вся
+    апертура. Вырожденный отрезок (измерена одна строка/столбец) раздвигается
+    до трёх клеток: иначе pyqtgraph получает пустой диапазон и карта нечитаема.
+    Возвращает None, если показывать нечего.
+    """
+    amp_img = np.asarray(amp_img, dtype=float)
+    x_pts = np.asarray(x_pts, dtype=float)
+    y_pts = np.asarray(y_pts, dtype=float)
+    if x_pts.size == 0 or y_pts.size == 0:
+        return None
+
+    dx = float(x_pts[1] - x_pts[0]) if x_pts.size > 1 else 1.0
+    dy = float(y_pts[1] - y_pts[0]) if y_pts.size > 1 else 1.0
+    x0, x1 = float(x_pts.min()), float(x_pts.max())
+    y0, y1 = float(y_pts.min()), float(y_pts.max())
+
+    if amp_img.size:
+        measured = np.isfinite(amp_img)
+        if measured.any():
+            cols = np.where(np.any(measured, axis=1))[0]   # какие X измерены
+            rows = np.where(np.any(measured, axis=0))[0]   # какие Y измерены
+            x0, x1 = float(x_pts[cols[0]]), float(x_pts[cols[-1]])
+            y0, y1 = float(y_pts[rows[0]]), float(y_pts[rows[-1]])
+
+    x0, x1 = expand_span(x0, x1, abs(dx) * 3, abs(dx) / 2)
+    y0, y1 = expand_span(y0, y1, abs(dy) * 3, abs(dy) / 2)
+    return x0, x1, y0, y1
 
 
 def field_stats(amp_img, phase_img, x_pts, y_pts):

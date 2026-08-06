@@ -1,8 +1,13 @@
 # -*- coding: utf-8 -*-
 """Панель ближнего поля: 2D-карта амплитуды ИЛИ фазы по апертуре.
 
-Показывается одна карта, переключатель сверху выбирает величину. Логика
-подготовки данных — в near_field_data (без Qt), здесь только отрисовка.
+Показывается одна карта, переключатель сверху выбирает величину. Отрисовка и
+работа мышью сделаны как в режиме «Измерение лучей АФАР» основного проекта:
+палитра turbo, свободный масштаб (ЛКМ — сдвиг, ПКМ — масштаб по двум осям,
+колесо — зум), двойной клик по карте подгоняет вид под измеренные точки,
+шкала правится перетаскиванием ручек или вводом значений по двойному клику.
+
+Подготовка данных — в near_field_data (без Qt), здесь только отрисовка.
 """
 
 import csv
@@ -13,13 +18,19 @@ import pyqtgraph.exporters  # noqa: F401  (регистрирует pg.exporters
 from PyQt5 import QtCore, QtGui, QtWidgets
 from loguru import logger
 
+from .editable_colorbar import EditableColorBarItem, prompt_colorbar_range
 from .icon_utils import app_icon
-from .near_field_data import (DEFAULT_FLOOR_DB, PHASE_LEVELS, amp_display,
-                              amp_levels, axis_points, field_stats, prepare_maps)
+from .near_field_data import (PHASE_LEVELS, auto_levels, axis_points,
+                              field_stats, measured_bounds, prepare_maps)
 
-AMP_CMAP = 'viridis'
-PHASE_CMAP = 'CET-C6'                  # циклическая: стык −180/+180 без ложного разрыва
-HOLE_COLOR = (203, 213, 225, 255)      # точки без измерения — серым, а не «минус бесконечность»
+# Палитра как в скане лучей: синий→…→красный, максимум красный. Одна и та же
+# для амплитуды и фазы — чтобы карты читались одинаково.
+FIELD_CMAP = 'turbo'
+
+MODES = {
+    'amp': {'title': 'Амплитуда (2D)', 'units': 'дБ'},
+    'phase': {'title': 'Фаза (2D)', 'units': 'град'},
+}
 
 
 class NearFieldPanel(QtWidgets.QWidget):
@@ -36,10 +47,14 @@ class NearFieldPanel(QtWidgets.QWidget):
         self._rect = (0.0, 0.0, 1.0, 1.0)
         self._x_pts = np.empty(0)
         self._y_pts = np.empty(0)
-        self._mode = 'amp'          # 'amp' | 'phase'
-        self._normalize = True
-        self._floor_db = DEFAULT_FLOOR_DB
+        self._mode = 'amp'
         self._label = ''
+
+        # Режим шкал: амплитуда по данным, фаза — фиксированные -180..180
+        # (как в скане лучей).
+        self._auto = {'amp': True, 'phase': False}
+        self._levels = {'amp': None, 'phase': PHASE_LEVELS}
+        self._updating_levels = False
 
         root = QtWidgets.QHBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -61,6 +76,7 @@ class NearFieldPanel(QtWidgets.QWidget):
 
         self._proxy = pg.SignalProxy(self.plot.scene().sigMouseMoved,
                                      rateLimit=60, slot=self._on_mouse_move)
+        self.plot.scene().sigMouseClicked.connect(self._on_scene_click)
 
     # ------------------------------------------------------------- построение
     def _icon_btn(self, icon, tip, slot, checkable=False, shortcut=None):
@@ -85,18 +101,15 @@ class NearFieldPanel(QtWidgets.QWidget):
         col.setContentsMargins(2, 2, 2, 2)
         col.setSpacing(4)
 
-        col.addWidget(self._icon_btn('autoscale', 'Показать всю апертуру', self.autoscale))
+        col.addWidget(self._icon_btn(
+            'autoscale', 'Подогнать масштаб под измеренные точки.\n'
+                         'То же самое — двойной клик по карте',
+            self.fit_to_data))
         self.aspect_btn = self._icon_btn(
             'aspect', 'Равный масштаб по X и Y (апертура без искажений).\n'
-                      'Выключите, чтобы растянуть картинку на всё окно',
+                      'Пока включён, ПКМ тянет обе оси вместе',
             self._toggle_aspect, checkable=True)
-        self.aspect_btn.setChecked(True)
         col.addWidget(self.aspect_btn)
-        self.norm_btn = self._icon_btn(
-            'normalize', 'Нормировка амплитуды к максимуму (0 дБ)',
-            self._toggle_norm, checkable=True)
-        self.norm_btn.setChecked(self._normalize)
-        col.addWidget(self.norm_btn)
         col.addSpacing(8)
         col.addWidget(self._icon_btn('csv', 'Экспорт текущей карты в CSV', self._export_csv))
         col.addWidget(self._icon_btn('png', 'Экспорт картинки в PNG', self._export_png))
@@ -113,14 +126,12 @@ class NearFieldPanel(QtWidgets.QWidget):
 
         self._mode_group = QtWidgets.QButtonGroup(self)
         self._mode_group.setExclusive(True)
-        for mode, text, tip in (
-            ('amp', 'Амплитуда', 'Амплитуда ближнего поля, дБ'),
-            ('phase', 'Фаза', 'Фаза ближнего поля, градусы'),
-        ):
+        for mode in ('amp', 'phase'):
+            text = 'Амплитуда' if mode == 'amp' else 'Фаза'
             btn = QtWidgets.QToolButton()
             btn.setText(text)
             btn.setCheckable(True)
-            btn.setToolTip(tip)
+            btn.setToolTip(f'{MODES[mode]["title"]}, {MODES[mode]["units"]}')
             btn.setChecked(mode == self._mode)
             btn.clicked.connect(lambda _=False, m=mode: self.set_mode(m))
             self._mode_group.addButton(btn)
@@ -129,31 +140,33 @@ class NearFieldPanel(QtWidgets.QWidget):
         return bar
 
     def _build_plot(self):
-        self.plot = pg.PlotWidget()
-        self.plot.setBackground('#fbfcff')
-        pi = self.plot.getPlotItem()
-        self._pi = pi
-        pi.showGrid(x=True, y=True, alpha=0.15)
-        pi.setMenuEnabled(False)
-        pi.getAxis('bottom').setLabel('X, см')
-        pi.getAxis('left').setLabel('Y, см')
-        pi.setAspectLocked(True)
-        pi.setTitle('Ближнее поле', color='#1f2937', size='11pt')
+        self.plot = pg.PlotWidget(title=MODES['amp']['title'])
+        self.plot.setBackground('w')
+        self.plot.showGrid(x=True, y=True, alpha=0.3)
+        self.plot.setLabel('left', 'Y (см)')
+        self.plot.setLabel('bottom', 'X (см)')
+        self._pi = self.plot.getPlotItem()
+        # Масштаб не заперт и меню включено — мышь работает как в скане лучей:
+        # ЛКМ тянет вид, ПКМ меняет масштаб по обеим осям, колесо зумит.
 
         # axisOrder='col-major' — первая ось массива горизонтальная (см. near_field_data).
+        # NaN (непромеренные точки) pyqtgraph рисует прозрачными сам.
         self._img = pg.ImageItem()
         self._img.setOpts(axisOrder='col-major')
-        pi.addItem(self._img)
+        self._pi.addItem(self._img)
 
-        # Отдельным слоем — неизмеренные точки: иначе NaN уедет в «самый низкий» цвет.
-        self._holes = pg.ImageItem()
-        self._holes.setOpts(axisOrder='col-major')
-        self._holes.setZValue(10)
-        pi.addItem(self._holes)
+        # Перекрестие под курсором — как на карте скана.
+        cross_pen = pg.mkPen('k', width=1, style=QtCore.Qt.DashLine)
+        self._vline = pg.InfiniteLine(angle=90, movable=False, pen=cross_pen)
+        self._hline = pg.InfiniteLine(angle=0, movable=False, pen=cross_pen)
+        self._pi.addItem(self._vline, ignoreBounds=True)
+        self._pi.addItem(self._hline, ignoreBounds=True)
 
-        self._cbar = pg.ColorBarItem(colorMap=pg.colormap.get(AMP_CMAP),
-                                     label='дБ', interactive=True)
-        self._cbar.setImageItem(self._img, insert_in=pi)
+        self._cbar = EditableColorBarItem(colorMap=pg.colormap.get(FIELD_CMAP),
+                                          label=MODES['amp']['units'])
+        self._cbar.setImageItem(self._img, insert_in=self._pi)
+        self._cbar.sigDoubleClicked.connect(self._edit_colorbar)
+        self._cbar.sigLevelsChanged.connect(self._on_user_levels)
 
     # ------------------------------------------------------------------ данные
     def set_field(self, amp, phase, x_list, y_list, dx, dy, label=''):
@@ -175,73 +188,104 @@ class NearFieldPanel(QtWidgets.QWidget):
         self._refresh()
         if not same_geometry:
             # Апертура та же — сохраняем масштаб, иначе зум слетал бы на каждом луче.
-            self.autoscale()
+            self.fit_to_data()
         return field_stats(self._amp, self._phase, self._x_pts, self._y_pts)
 
     def clear_data(self):
         self._amp = None
         self._phase = None
         self._img.clear()
-        self._holes.clear()
         self.readout.setText(' ')
-        self._pi.setTitle('Ближнее поле', color='#1f2937', size='11pt')
+        self._pi.setTitle(MODES[self._mode]['title'])
 
     def set_mode(self, mode):
-        """Переключить величину: 'amp' (дБ) или 'phase' (°)."""
+        """Переключить величину: 'amp' (дБ) или 'phase' (град)."""
         mode = 'phase' if str(mode) == 'phase' else 'amp'
         self._mode = mode
         self._amp_btn.setChecked(mode == 'amp')
         self._phase_btn.setChecked(mode == 'phase')
-        self.norm_btn.setEnabled(mode == 'amp')
+        self._cbar.setLabel('left', MODES[mode]['units'])
         self._refresh()
 
-    def _current_image(self):
-        """Картинка, пределы шкалы, палитра и единицы для текущего режима."""
-        if self._mode == 'phase':
-            return self._phase, PHASE_LEVELS, pg.colormap.get(PHASE_CMAP), '°'
-        img = amp_display(self._amp, self._normalize)
-        return img, amp_levels(img, self._floor_db), pg.colormap.get(AMP_CMAP), 'дБ'
+    def _current_data(self):
+        return self._phase if self._mode == 'phase' else self._amp
 
     def _refresh(self):
-        if self._amp is None:
+        img = self._current_data()
+        if img is None:
             return
-        img, levels, cmap, unit = self._current_image()
-        self._img.setImage(img, autoLevels=False, levels=levels)
+        mode = self._mode
+        if self._auto[mode] or self._levels[mode] is None:
+            self._levels[mode] = auto_levels(img)
+
+        self._img.setImage(img, autoLevels=False)
         self._img.setRect(QtCore.QRectF(*self._rect))
-        self._cbar.setColorMap(cmap)
-        self._cbar.setLevels(values=levels)
-        self._cbar.setLabel('left', unit)
-        self._refresh_holes(img)
+        self._set_levels(*self._levels[mode])
 
-        kind = 'фаза, °' if self._mode == 'phase' else (
-            'амплитуда, дБ (норм.)' if self._normalize else 'амплитуда, дБ')
-        title = f'Ближнее поле · {kind}'
+        title = MODES[mode]['title']
         if self._label:
-            title = f'{title} · {self._label}'
-        self._pi.setTitle(title, color='#1f2937', size='11pt')
+            title = f'{title} — {self._label}'
+        self._pi.setTitle(title)
 
-    def _refresh_holes(self, img):
-        """Точки без измерения — отдельным слоем поверх карты."""
-        mask = ~np.isfinite(np.asarray(img, dtype=float))
-        if not mask.any():
-            self._holes.clear()
+    # -------------------------------------------------------------- шкала
+    def _set_levels(self, lo, hi):
+        """Задать уровни, не переводя шкалу в ручной режим."""
+        self._updating_levels = True
+        try:
+            self._cbar.setLevels((lo, hi))
+        finally:
+            self._updating_levels = False
+
+    def _on_user_levels(self, *_args):
+        """Перетаскивание ручек на шкале → переход в ручной режим."""
+        if self._updating_levels:
             return
-        rgba = np.zeros(mask.shape + (4,), dtype=np.ubyte)
-        rgba[mask] = HOLE_COLOR
-        self._holes.setImage(rgba, autoLevels=False)
-        self._holes.setRect(QtCore.QRectF(*self._rect))
+        self._auto[self._mode] = False
+        self._levels[self._mode] = tuple(self._cbar.levels())
+
+    def _edit_colorbar(self):
+        """Диалог ввода диапазона шкалы (двойной клик по колорбару)."""
+        mode = self._mode
+        lo, hi = self._cbar.levels()
+        res = prompt_colorbar_range(self, MODES[mode]['units'], lo, hi,
+                                    'Автомасштаб по данным', self._auto[mode])
+        if res is None:
+            return
+        if res[0] == 'auto':
+            self._auto[mode] = True
+            self._levels[mode] = None
+            self._refresh()
+            return
+        _, lo2, hi2 = res
+        self._auto[mode] = False
+        self._levels[mode] = (lo2, hi2)
+        self._set_levels(lo2, hi2)
 
     # ------------------------------------------------------------- управление
-    def autoscale(self):
-        self._pi.enableAutoRange(x=True, y=True)
+    def fit_to_data(self):
+        """Подогнать масштаб под измеренные точки."""
+        if self._amp is None:
+            return
+        bounds = measured_bounds(self._amp, self._x_pts, self._y_pts)
+        if bounds is None:
+            return
+        x0, x1, y0, y1 = bounds
+        self.plot.setRange(xRange=(x0, x1), yRange=(y0, y1), padding=0.02)
 
     def _toggle_aspect(self):
         self._pi.setAspectLocked(self.aspect_btn.isChecked())
-        self.autoscale()
+        self.fit_to_data()
 
-    def _toggle_norm(self):
-        self._normalize = self.norm_btn.isChecked()
-        self._refresh()
+    def _on_scene_click(self, event):
+        """Двойной клик по карте — подогнать масштаб под измеренные точки."""
+        if not event.double():
+            return
+        view_box = self._pi.getViewBox()
+        # Клики по шкале и полям графика обрабатывает не этот метод.
+        if not view_box.sceneBoundingRect().contains(event.scenePos()):
+            return
+        event.accept()
+        self.fit_to_data()
 
     # ----------------------------------------------------------------- курсор
     def _on_mouse_move(self, evt):
@@ -253,6 +297,8 @@ class NearFieldPanel(QtWidgets.QWidget):
         if ix is None:
             self.readout.setText(' ')
             return
+        self._vline.setPos(float(self._x_pts[ix]))
+        self._hline.setPos(float(self._y_pts[iy]))
         amp = self._amp[ix, iy]
         phase = self._phase[ix, iy]
         amp_txt = '—' if not np.isfinite(amp) else f'{amp:.2f} дБ'
@@ -287,17 +333,18 @@ class NearFieldPanel(QtWidgets.QWidget):
             QtWidgets.QMessageBox.critical(self, 'Ошибка экспорта', str(exc))
 
     def _export_csv(self):
-        if self._amp is None:
+        img = self._current_data()
+        if img is None:
             return
         path, _ = QtWidgets.QFileDialog.getSaveFileName(
             self, 'Сохранить карту', 'near_field.csv', 'CSV (*.csv)')
         if not path:
             return
-        img, _levels, _cmap, unit = self._current_image()
+        units = MODES[self._mode]['units']
         try:
             with open(path, 'w', newline='', encoding='utf-8') as f:
                 writer = csv.writer(f, delimiter=';')
-                writer.writerow([f'Y \\ X, см ({unit})']
+                writer.writerow([f'Y \\ X, см ({units})']
                                 + [f'{v:.3f}' for v in self._x_pts])
                 for iy in range(img.shape[1]):
                     row = ['' if not np.isfinite(v) else f'{v:.4f}' for v in img[:, iy]]
