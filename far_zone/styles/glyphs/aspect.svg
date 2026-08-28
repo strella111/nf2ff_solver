@@ -1,0 +1,6 @@
+<!-- Равный масштаб X/Y: квадрат и две одинаковые мерные стрелки. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+  <rect x="4.6" y="3.6" width="11" height="11" rx="1.6"/>
+  <path d="M4.6 18.4h11m-2-2 2 2-2 2M6.6 16.4l-2 2 2 2"/>
+  <path d="M19.4 3.6v11m-2-2 2 2 2-2M17.4 5.6l2-2 2 2"/>
+</svg>

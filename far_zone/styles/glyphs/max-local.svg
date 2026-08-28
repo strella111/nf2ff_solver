@@ -1,0 +1,6 @@
+<!-- Следующий локальный максимум: та же кривая, точка на СЛЕДУЮЩЕМ пике + стрелка перехода. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M1.6 20.6C3.9 20.6 4.4 8.6 7.2 8.6s3.3 12 5.6 12c1.7 0 2-5.6 4.2-5.6s2.5 5.6 4.2 5.6"/>
+  <path d="M9.6 4.4h6.8m-2.1-2.1 2.1 2.1-2.1 2.1"/>
+  <circle cx="17" cy="15" r="2.05" fill="currentColor" stroke="none"/>
+</svg>

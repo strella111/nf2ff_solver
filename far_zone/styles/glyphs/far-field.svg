@@ -1,0 +1,5 @@
+<!-- Дальняя зона: сечение ДН — главный лепесток и боковые. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M1.4 20.6c1.6 0 1.9-4.6 3.6-4.6s2 4.6 3.6 4.6c1.9 0 2.2-16 3.4-16s1.5 16 3.4 16c1.6 0 1.9-4.6 3.6-4.6s2 4.6 3.6 4.6"/>
+  <path d="M1.4 20.6h21.2" stroke-opacity=".4"/>
+</svg>

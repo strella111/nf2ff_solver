@@ -1,0 +1,6 @@
+<!-- Открыть отдельный файл измерения. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M13.6 2.6H6.8a2 2 0 0 0-2 2v14.8a2 2 0 0 0 2 2h10.4a2 2 0 0 0 2-2V8z"/>
+  <path d="M13.6 2.6V8h5.6"/>
+  <path d="M12 11v6.2m-2.7-2.7 2.7 2.7 2.7-2.7"/>
+</svg>

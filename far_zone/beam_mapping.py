@@ -75,3 +75,65 @@ def angles_to_beam(alpha: float, beta: float) -> BeamMapEntry:
 def load_beam_map(path: str | Path | None = None) -> BeamMap:
     entries = [beam_to_angles(beam_num) for beam_num in range(1, TOTAL_BEAMS + 1)]
     return BeamMap(entries=entries)
+
+
+# ------------------------------------------------- Порядок перебора лучей
+# Луч задаётся парой углов: α — азимут, β — угол места. Нумерация идёт
+# растром (см. beam_to_angles), поэтому «по номеру» — это уже «все углы места
+# при одном азимуте»; обратная группировка — тот же индекс, но транспонированный.
+BEAM_ORDER_NUMBER = 'number'
+BEAM_ORDER_AZIMUTH = 'azimuth'      # все углы места при одном азимуте
+BEAM_ORDER_ELEVATION = 'elevation'  # все азимуты при одном угле места
+
+
+def _beam_angles_or_none(beam) -> tuple[float, float] | None:
+    """(α, β) луча или None, если углы неизвестны (не номер / вне сетки)."""
+    try:
+        entry = beam_to_angles(int(beam))
+    except (TypeError, ValueError):
+        return None
+    return entry.alpha, entry.beta
+
+
+def group_beams(beams, order: str = BEAM_ORDER_NUMBER) -> list[tuple[float | None, list]]:
+    """Разбить лучи на группы по ведущему углу.
+
+    order:
+        'number'    — без группировки, по возрастанию номера;
+        'azimuth'   — все углы места при одном азимуте, затем следующий азимут;
+        'elevation' — все азимуты при одном угле места, затем следующий.
+
+    Работает по ПРОИЗВОЛЬНОМУ набору номеров: в окне лежат только измеренные
+    лучи (десятки из 5967), полная решётка не предполагается.
+
+    Лучи без углов (режим одиночного файла, номер вне сетки) собираются в
+    последнюю группу с ведущим углом None — они не теряются ни при каком порядке.
+
+    Returns: [(ведущий угол или None, [луч, ...]), ...]
+    """
+    leading: dict[float | None, list[tuple]] = {}
+    unknown = []
+    for beam in beams:
+        angles = _beam_angles_or_none(beam)
+        if angles is None:
+            unknown.append(beam)
+            continue
+        alpha, beta = angles
+        if order == BEAM_ORDER_AZIMUTH:
+            lead, follow = alpha, beta
+        elif order == BEAM_ORDER_ELEVATION:
+            lead, follow = beta, alpha
+        else:
+            lead, follow = None, beam   # одна группа, внутри — по номеру
+        leading.setdefault(lead, []).append((follow, beam))
+
+    groups = [(lead, [beam for _, beam in sorted(items)])
+              for lead, items in sorted(leading.items(), key=lambda kv: (kv[0] is None, kv[0]))]
+    if unknown:
+        groups.append((None, unknown))
+    return groups
+
+
+def order_beams(beams, order: str = BEAM_ORDER_NUMBER) -> list:
+    """Плоский список лучей в выбранном порядке (см. group_beams)."""
+    return [beam for _, group in group_beams(beams, order) for beam in group]

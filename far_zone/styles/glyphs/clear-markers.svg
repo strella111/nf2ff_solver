@@ -1,0 +1,6 @@
+<!-- Убрать все маркеры: линии маркеров и знак снятия. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M8.4 2.6v12.2" stroke-dasharray="2.5 2.2"/>
+  <path d="M2.6 8.4h12.2" stroke-dasharray="2.5 2.2"/>
+  <path d="m15.4 15.4 6 6m0-6-6 6"/>
+</svg>

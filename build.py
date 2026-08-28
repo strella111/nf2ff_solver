@@ -12,7 +12,8 @@
     2. Создаёт виртуальное окружение .venv (если его ещё нет).
     3. Ставит зависимости из requirements.txt ТОЛЬКО в это окружение
        (глобальный Python не трогается).
-    4. Запускает PyInstaller из venv по FarZone.spec.
+    4. Собирает иконку .exe из app.svg (build_icon.py).
+    5. Запускает PyInstaller из venv по FarZone.spec.
 
 Результат: dist/FarZone-<версия>.exe
 """
@@ -72,21 +73,42 @@ def ensure_venv(clean: bool) -> None:
         shutil.rmtree(VENV_DIR)
 
     if not venv_python().exists():
-        print("[1/3] Создаю виртуальное окружение .venv ...")
+        print("[1/4] Создаю виртуальное окружение .venv ...")
         run([sys.executable, "-m", "venv", str(VENV_DIR)])
     else:
-        print("[1/3] Виртуальное окружение .venv уже существует.")
+        print("[1/4] Виртуальное окружение .venv уже существует.")
 
 
 def install_deps() -> None:
-    print("[2/3] Устанавливаю зависимости в .venv ...")
+    print("[2/4] Устанавливаю зависимости в .venv ...")
     py = venv_python()
     run([py, "-m", "pip", "install", "--upgrade", "pip"])
     run([py, "-m", "pip", "install", "-r", str(REQUIREMENTS)])
 
 
+def make_icon() -> None:
+    """Собрать build/FarZone.ico из app.svg — иконку самого .exe.
+
+    Не критично для сборки: если Qt в окружении не смог отрисовать SVG, exe
+    соберётся с иконкой по умолчанию, а сборка не упадёт.
+    """
+    script = ROOT / "build_icon.py"
+    if not script.exists():
+        return
+    print("[3/4] Готовлю иконку .exe ...")
+    try:
+        result = subprocess.run([str(venv_python()), str(script)], cwd=ROOT,
+                                timeout=120)
+    except subprocess.TimeoutExpired:
+        # Страховка: иконка не то, ради чего стоит вешать сборку.
+        print("    ! отрисовка иконки не уложилась в 120 с — пропускаю")
+        return
+    if result.returncode != 0:
+        print("    ! иконку собрать не удалось — exe будет с иконкой по умолчанию")
+
+
 def build() -> None:
-    print("[3/3] Сборка PyInstaller ...")
+    print("[4/4] Сборка PyInstaller ...")
     run([venv_python(), "-m", "PyInstaller", "--noconfirm", "--clean", str(SPEC)])
 
 
@@ -116,6 +138,7 @@ def main() -> None:
 
     ensure_venv(clean=args.clean)
     install_deps()
+    make_icon()
     build()
 
     print(f"\n=== Готово: dist/FarZone-{version}.exe ===")

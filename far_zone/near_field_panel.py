@@ -3,9 +3,10 @@
 
 Показывается одна карта, переключатель сверху выбирает величину. Отрисовка и
 работа мышью сделаны как в режиме «Измерение лучей АФАР» основного проекта:
-палитра turbo, свободный масштаб (ЛКМ — сдвиг, ПКМ — масштаб по двум осям,
-колесо — зум), двойной клик по карте подгоняет вид под измеренные точки,
-шкала правится перетаскиванием ручек или вводом значений по двойному клику.
+свободный масштаб (ЛКМ — сдвиг, ПКМ — масштаб по двум осям, колесо — зум),
+двойной клик по карте подгоняет вид под измеренные точки, шкала правится
+перетаскиванием ручек или вводом значений по двойному клику. Палитра у
+амплитуды turbo (как в скане), у фазы — циклическая (см. PHASE_CMAP).
 
 Подготовка данных — в near_field_data (без Qt), здесь только отрисовка.
 """
@@ -19,18 +20,28 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 from loguru import logger
 
 from .app_style import reserve_bold_width
+from .design_tokens import ACCENT, ICON_DEFAULT, ICON_MD, MARKER_PEAK, PLOT_BG
 from .editable_colorbar import EditableColorBarItem, prompt_colorbar_range
 from .icon_utils import app_icon
 from .near_field_data import (PHASE_LEVELS, auto_levels, axis_points,
                               field_stats, measured_bounds, prepare_maps)
 
-# Палитра как в скане лучей: синий→…→красный, максимум красный. Одна и та же
-# для амплитуды и фазы — чтобы карты читались одинаково.
-FIELD_CMAP = 'turbo'
+# Амплитуда — как в скане лучей: turbo, синий→…→красный, максимум красный.
+AMP_CMAP = 'turbo'
+
+# Фаза — ЦИКЛИЧЕСКАЯ палитра. Фаза замыкается: −179° и +179° физически почти
+# одно и то же, а turbo красил их в синий и красный (разрыв 74/255 между
+# концами шкалы) — на карте появлялся скачок там, где его нет, и наоборот.
+# CET-C1 замкнута (разрыв 2/255) и нигде не подходит к белому ближе 122/255,
+# поэтому не сливается с непромеренными (прозрачными) точками.
+PHASE_CMAP = 'CET-C1'
+
+# Отметка максимума на карте — тем же цветом, что маркер максимума на графике ДН.
+MAX_MARKER_COLOR = MARKER_PEAK
 
 MODES = {
-    'amp': {'title': 'Амплитуда (2D)', 'units': 'дБ'},
-    'phase': {'title': 'Фаза (2D)', 'units': 'град'},
+    'amp': {'title': 'Амплитуда (2D)', 'units': 'дБ', 'cmap': AMP_CMAP},
+    'phase': {'title': 'Фаза (2D)', 'units': 'град', 'cmap': PHASE_CMAP},
 }
 
 
@@ -50,6 +61,7 @@ class NearFieldPanel(QtWidgets.QWidget):
         self._y_pts = np.empty(0)
         self._mode = 'amp'
         self._label = ''
+        self._stats = None
 
         # Режим шкал: амплитуда по данным, фаза — фиксированные -180..180
         # (как в скане лучей).
@@ -80,11 +92,12 @@ class NearFieldPanel(QtWidgets.QWidget):
         self.plot.scene().sigMouseClicked.connect(self._on_scene_click)
 
     # ------------------------------------------------------------- построение
-    def _icon_btn(self, icon, tip, slot, checkable=False, shortcut=None):
+    def _icon_btn(self, icon, tip, slot, checkable=False, shortcut=None,
+                  color=ICON_DEFAULT, color_on=None):
         btn = QtWidgets.QToolButton()
         btn.setProperty('plotTool', True)
-        btn.setIcon(app_icon(icon))
-        btn.setIconSize(QtCore.QSize(18, 18))
+        btn.setIcon(app_icon(icon, color=color, color_on=color_on))
+        btn.setIconSize(QtCore.QSize(ICON_MD, ICON_MD))
         if shortcut:
             btn.setShortcut(QtGui.QKeySequence(shortcut))
             tip = f'{tip}  [{shortcut}]'
@@ -106,10 +119,15 @@ class NearFieldPanel(QtWidgets.QWidget):
             'autoscale', 'Подогнать масштаб под измеренные точки.\n'
                          'То же самое — двойной клик по карте',
             self.fit_to_data))
+        self.max_btn = self._icon_btn(
+            'max-global', 'Отметить максимум амплитуды на карте',
+            self._toggle_max_marker, checkable=True, color=MAX_MARKER_COLOR,
+            color_on=MAX_MARKER_COLOR)
+        col.addWidget(self.max_btn)
         self.aspect_btn = self._icon_btn(
             'aspect', 'Равный масштаб по X и Y (апертура без искажений).\n'
                       'Пока включён, ПКМ тянет обе оси вместе',
-            self._toggle_aspect, checkable=True)
+            self._toggle_aspect, checkable=True, color_on=ACCENT)
         col.addWidget(self.aspect_btn)
         col.addSpacing(8)
         col.addWidget(self._icon_btn('csv', 'Экспорт текущей карты в CSV', self._export_csv))
@@ -143,8 +161,10 @@ class NearFieldPanel(QtWidgets.QWidget):
 
     def _build_plot(self):
         self.plot = pg.PlotWidget(title=MODES['amp']['title'])
-        self.plot.setBackground('w')
-        self.plot.showGrid(x=True, y=True, alpha=0.3)
+        self.plot.setBackground(PLOT_BG)
+        # Сетка поверх тепловой карты мешает считывать цвет — оставлена
+        # еле заметной, только как ориентир по координатам.
+        self.plot.showGrid(x=True, y=True, alpha=0.12)
         self.plot.setLabel('left', 'Y (см)')
         self.plot.setLabel('bottom', 'X (см)')
         self._pi = self.plot.getPlotItem()
@@ -164,11 +184,24 @@ class NearFieldPanel(QtWidgets.QWidget):
         self._pi.addItem(self._vline, ignoreBounds=True)
         self._pi.addItem(self._hline, ignoreBounds=True)
 
-        self._cbar = EditableColorBarItem(colorMap=pg.colormap.get(FIELD_CMAP),
+        self._cbar = EditableColorBarItem(colorMap=pg.colormap.get(MODES['amp']['cmap']),
                                           label=MODES['amp']['units'])
         self._cbar.setImageItem(self._img, insert_in=self._pi)
         self._cbar.sigDoubleClicked.connect(self._edit_colorbar)
         self._cbar.sigLevelsChanged.connect(self._on_user_levels)
+
+        # Отметка максимума амплитуды. Координаты уже считает field_stats —
+        # раньше они никуда не выводились, и точку приходилось искать глазом.
+        self._max_dot = pg.ScatterPlotItem(
+            size=15, symbol='+', pen=pg.mkPen(MAX_MARKER_COLOR, width=2.4),
+            brush=None)
+        self._max_dot.setZValue(20)
+        self._max_dot.hide()
+        self._pi.addItem(self._max_dot, ignoreBounds=True)
+        self._max_label = pg.TextItem(color=MAX_MARKER_COLOR, anchor=(0.5, 1.5))
+        self._max_label.setZValue(21)
+        self._max_label.hide()
+        self._pi.addItem(self._max_label, ignoreBounds=True)
 
     # ------------------------------------------------------------------ данные
     def set_field(self, amp, phase, x_list, y_list, dx, dy, label=''):
@@ -187,16 +220,20 @@ class NearFieldPanel(QtWidgets.QWidget):
         self._x_pts = axis_points(x_list, n_x, dx)
         self._y_pts = axis_points(y_list, n_y, dy)
         self._label = label
+        self._stats = field_stats(self._amp, self._phase, self._x_pts, self._y_pts)
         self._refresh()
+        self._refresh_max_marker()
         if not same_geometry:
             # Апертура та же — сохраняем масштаб, иначе зум слетал бы на каждом луче.
             self.fit_to_data()
-        return field_stats(self._amp, self._phase, self._x_pts, self._y_pts)
+        return self._stats
 
     def clear_data(self):
         self._amp = None
         self._phase = None
+        self._stats = None
         self._img.clear()
+        self._refresh_max_marker()   # иначе отметка зависла бы над пустой картой
         self.readout.setText(' ')
         self._pi.setTitle(MODES[self._mode]['title'])
 
@@ -207,6 +244,8 @@ class NearFieldPanel(QtWidgets.QWidget):
         self._amp_btn.setChecked(mode == 'amp')
         self._phase_btn.setChecked(mode == 'phase')
         self._cbar.setLabel('left', MODES[mode]['units'])
+        # У фазы своя (замкнутая) палитра — меняем вместе с величиной.
+        self._cbar.setColorMap(pg.colormap.get(MODES[mode]['cmap']))
         self._refresh()
 
     def _current_data(self):
@@ -278,6 +317,29 @@ class NearFieldPanel(QtWidgets.QWidget):
         self._pi.setAspectLocked(self.aspect_btn.isChecked())
         self.fit_to_data()
 
+    def _toggle_max_marker(self):
+        self._refresh_max_marker()
+
+    def _refresh_max_marker(self):
+        """Показать/убрать отметку максимума амплитуды на карте.
+
+        Максимум ищется по амплитуде и на карте фазы тоже: интересно, какая
+        фаза в точке максимума, а не где максимум самой фазы.
+        """
+        stats = self._stats or {}
+        x, y = stats.get('max_x'), stats.get('max_y')
+        if not self.max_btn.isChecked() or x is None or y is None:
+            self._max_dot.hide()
+            self._max_label.hide()
+            return
+        self._max_dot.setData([x], [y])
+        self._max_dot.show()
+        value = stats.get('max_db')
+        text = f'макс {value:.2f} дБ' if value is not None else 'макс'
+        self._max_label.setText(f'{text}\nX {x:.2f}  Y {y:.2f}')
+        self._max_label.setPos(x, y)
+        self._max_label.show()
+
     def _on_scene_click(self, event):
         """Двойной клик по карте — подогнать масштаб под измеренные точки."""
         if not event.double():
@@ -344,7 +406,9 @@ class NearFieldPanel(QtWidgets.QWidget):
             return
         units = MODES[self._mode]['units']
         try:
-            with open(path, 'w', newline='', encoding='utf-8') as f:
+            # utf-8-sig, а не utf-8: без BOM Excel на русской Windows читает
+            # файл как CP1251 и заголовки превращаются в мусор.
+            with open(path, 'w', newline='', encoding='utf-8-sig') as f:
                 writer = csv.writer(f, delimiter=';')
                 writer.writerow([f'Y \\ X, см ({units})']
                                 + [f'{v:.3f}' for v in self._x_pts])

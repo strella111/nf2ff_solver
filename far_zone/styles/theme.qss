@@ -10,22 +10,6 @@ QDialog {
     background-color: #f4f6f8;
 }
 
-QMenuBar {
-    background-color: #ffffff;
-    border-bottom: 1px solid #d8dee7;
-    padding: 2px 6px;
-}
-
-QMenuBar::item {
-    background: transparent;
-    padding: 5px 9px;
-    border-radius: 4px;
-}
-
-QMenuBar::item:selected {
-    background-color: #e9eef5;
-}
-
 QMenu {
     background-color: #ffffff;
     border: 1px solid #cfd7e3;
@@ -57,15 +41,6 @@ QGroupBox::title {
     padding: 0 5px;
     color: #344054;
     background-color: #ffffff;
-}
-
-QGroupBox[compactToleranceGroup="true"] {
-    padding: 8px 2px 4px 2px;
-}
-
-QGroupBox[compactToleranceGroup="true"]::title {
-    left: 6px;
-    padding: 0 3px;
 }
 
 QLabel {
@@ -204,217 +179,58 @@ QToolButton:disabled {
     color: #9aa5b1;
 }
 
-QWidget#binaryOptionSwitch {
-    background-color: #edf1f6;
-    border: 1px solid #c7d0dc;
-    border-radius: 6px;
+/* Фокус с клавиатуры был виден только у полей ввода — у кнопок его не было
+   вовсе, и навигация с Tab шла вслепую. */
+QPushButton:focus,
+QToolButton:focus {
+    border-color: ${ACCENT_FOCUS};
 }
 
-QToolButton#binaryOptionSwitchButton {
-    background-color: transparent;
-    border: 0;
-    border-right: 1px solid #c7d0dc;
-    border-radius: 0;
-    color: #334155;
-    min-height: 20px;
-    padding: 3px 10px;
-}
-
-QToolButton#binaryOptionSwitchButton[switchPosition="last"],
-QToolButton#binaryOptionSwitchButton[switchPosition="single"] {
-    border-right: 0;
-}
-
-QToolButton#binaryOptionSwitchButton[switchPosition="first"],
-QToolButton#binaryOptionSwitchButton[switchPosition="single"] {
-    border-top-left-radius: 5px;
-    border-bottom-left-radius: 5px;
-}
-
-QToolButton#binaryOptionSwitchButton[switchPosition="last"],
-QToolButton#binaryOptionSwitchButton[switchPosition="single"] {
-    border-top-right-radius: 5px;
-    border-bottom-right-radius: 5px;
-}
-
-QToolButton#binaryOptionSwitchButton:hover {
-    background-color: #f8fafc;
-    color: #0f172a;
-}
-
-QToolButton#binaryOptionSwitchButton:checked {
-    background-color: #ffffff;
-    border-bottom: 2px solid ${ACCENT};
-    color: #0f172a;
+/* Главное действие экрана. Раньше все кнопки были одинаково белыми, и взгляду
+   не за что было зацепиться: «Открыть папку» весила столько же, сколько
+   «Инверт.». Ставится через свойство primary (см. FarFieldDialog._set_primary),
+   ровно одна кнопка на экран. */
+QPushButton[primary="true"] {
+    background-color: ${ACCENT};
+    border-color: ${ACCENT};
+    color: #ffffff;
     font-weight: 600;
 }
 
-QToolButton#binaryOptionSwitchButton:checked:hover {
-    background-color: #ffffff;
+QPushButton[primary="true"]:hover {
+    background-color: ${ACCENT_HOVER};
+    border-color: ${ACCENT_HOVER};
 }
 
-QToolButton#binaryOptionSwitchButton:disabled {
-    background-color: transparent;
+QPushButton[primary="true"]:pressed {
+    background-color: ${ACCENT_PRESSED};
+    border-color: ${ACCENT_PRESSED};
+}
+
+QPushButton[primary="true"]:focus {
+    border-color: ${ACCENT_PRESSED};
+}
+
+QPushButton[primary="true"]:disabled {
+    background-color: #eef1f5;
     border-color: #d8dee7;
     color: #9aa5b1;
 }
 
-QPushButton[connectionState="connected"] {
-    background-color: ${STATUS_OK_SURFACE};
-    border-color: ${STATUS_OK_SURFACE};
-    color: #1f2933;
-    font-weight: 600;
-}
-
-QPushButton[connectionState="connected"]:hover {
-    background-color: ${STATUS_OK_SURFACE};
-    border-color: ${STATUS_OK_SURFACE};
-}
-
-QPushButton[connectionState="disconnected"] {
-    background-color: ${STATUS_FAIL_SURFACE};
-    border-color: ${STATUS_FAIL_SURFACE};
-    color: #1f2933;
-    font-weight: 600;
-}
-
-QPushButton[connectionState="disconnected"]:hover {
-    background-color: ${STATUS_FAIL_SURFACE};
-    border-color: ${STATUS_FAIL_SURFACE};
-}
-
-QPushButton[connectionState="connecting"] {
-    background-color: ${STATUS_WARNING_SURFACE};
-    border-color: ${STATUS_WARNING_SURFACE};
-    color: #1f2933;
-    font-weight: 600;
-}
-
-QPushButton[connectionState="connecting"]:hover {
-    background-color: ${STATUS_WARNING_SURFACE};
-    border-color: ${STATUS_WARNING_SURFACE};
-}
-
-QToolButton#connectAllButton {
-    background-color: #f8fafc;
-    border: 1px solid #cfd7e3;
-    border-radius: 11px;
-    color: #475467;
-    font-size: 8pt;
-    padding: 2px 9px;
-}
-
-QToolButton#connectAllButton:hover {
-    background-color: ${ACCENT_SOFT};
-}
-
+/* Перебор лучей стрелками — самый частый клик в программе, поэтому кнопка
+   не мельче 28 px (было 26 при иконке 14). */
 QToolButton[navButton="true"] {
     padding: 0;
-    min-width: 26px;
-    max-width: 26px;
-    min-height: 26px;
-    max-height: 26px;
+    min-width: 28px;
+    max-width: 28px;
+    min-height: 28px;
+    max-height: 28px;
     border-radius: 6px;
 }
 
 QToolButton[plotTool="true"] {
     padding: 0;
     border-radius: 6px;
-}
-
-QToolButton#autoScrollButton {
-    min-height: 26px;
-    padding: 2px 8px;
-    color: #475467;
-    background-color: #f8fafc;
-    border-color: #cfd7e3;
-}
-
-QToolButton#autoScrollButton[autoScrollEnabled="true"] {
-    color: #1f2933;
-    background-color: #e8eef5;
-    border-color: #aeb9c8;
-    font-weight: 600;
-}
-
-QToolButton#autoScrollButton[autoScrollEnabled="false"] {
-    color: #667085;
-    background-color: #ffffff;
-    border-color: #d8dee7;
-}
-
-QComboBox[compactNavigator="true"] {
-    min-height: 26px;
-    max-height: 26px;
-    padding: 2px 5px;
-}
-
-QLabel[toleranceHeader="true"] {
-    color: #667085;
-    font-size: 8pt;
-    font-weight: 500;
-    padding: 0 2px 3px 2px;
-}
-
-QLabel[toleranceRowLabel="true"] {
-    color: #344054;
-    font-size: 8pt;
-    font-weight: 600;
-    padding: 0;
-}
-
-QTabWidget::pane {
-    background-color: #ffffff;
-    border: 1px solid #d8dee7;
-    border-radius: 6px;
-    top: -1px;
-}
-
-QTabBar::tab {
-    background-color: #e8edf3;
-    border: 1px solid #d8dee7;
-    border-bottom: 0;
-    border-top-left-radius: 5px;
-    border-top-right-radius: 5px;
-    padding: 6px 13px;
-    margin-right: 3px;
-}
-
-QTabBar::tab:selected {
-    background-color: #ffffff;
-    color: ${ACCENT_TEXT};
-}
-
-QTabBar::tab:hover:!selected {
-    background-color: #f1f5f9;
-}
-
-QTabBar::scroller {
-    width: 44px;
-}
-
-QTabBar QToolButton {
-    background-color: #e8edf3;
-    border: 1px solid #cbd5e1;
-    border-radius: 4px;
-    margin: 1px;
-    width: 22px;
-    padding: 0;
-}
-
-QTabBar QToolButton:hover {
-    background-color: #f8fafc;
-}
-
-QTabBar QToolButton:disabled {
-    background-color: #f1f5f9;
-    border-color: #e2e8f0;
-}
-
-QTabBar QToolButton::left-arrow,
-QTabBar QToolButton::right-arrow {
-    width: 7px;
-    height: 7px;
 }
 
 QTableView,
@@ -658,52 +474,6 @@ QRadioButton::indicator:checked:disabled {
     border-color: #edf0f4;
 }
 
-QTextEdit#logConsole {
-    background-color: #ffffff;
-    color: #172033;
-    border: 1px solid #cfd7e3;
-    border-radius: 5px;
-    padding: 6px;
-    font-family: Consolas, "Courier New", monospace;
-    font-size: 10pt;
-}
-
-QLabel[modeIndicator="true"] {
-    color: ${MODE_INDICATOR_TEXT};
-    padding: 5px 16px;
-    border-radius: 6px;
-    font-weight: bold;
-    font-size: 13px;
-}
-
-QLabel[modeIndicator="true"][modeKey="phase_ma"] {
-    background-color: ${MODE_PHASE_MA};
-}
-
-QLabel[modeIndicator="true"][modeKey="beam_calb_afar"] {
-    background-color: ${MODE_BEAM_CALB_AFAR};
-}
-
-QLabel[modeIndicator="true"][modeKey="check_ma"] {
-    background-color: ${MODE_CHECK_MA};
-}
-
-QLabel[modeIndicator="true"][modeKey="check_stend_ma"] {
-    background-color: ${MODE_CHECK_STEND_MA};
-}
-
-QLabel[modeIndicator="true"][modeKey="phase_afar"] {
-    background-color: ${MODE_PHASE_AFAR};
-}
-
-QLabel[modeIndicator="true"][modeKey="beam_pattern"] {
-    background-color: ${MODE_BEAM_PATTERN};
-}
-
-QLabel[modeIndicator="true"][modeKey="check_stend_afar"] {
-    background-color: ${MODE_CHECK_STEND_AFAR};
-}
-
 /* --- Общая полировка ---------------------------------------------------- */
 QPushButton:checked,
 QToolButton:checked {
@@ -750,37 +520,55 @@ QLabel[metricValue="true"] {
     font-weight: 600;
 }
 
-/* Заголовок окна/секции (вынесено из инлайна) */
-QLabel[dialogTitle="true"] {
-    font-size: 16px;
-    font-weight: bold;
-    margin: 2px;
+/* Таблица маркеров под графиком ДН: компактная, чтобы не отъедать высоту у
+   самого графика. Значения набраны моноширинным — так цифры не «пляшут»
+   при перетаскивании маркера. */
+QTableWidget#ffMarkerTable {
+    font-family: Consolas, "Courier New", monospace;
+    font-size: 9pt;
+    gridline-color: #eef2f6;
 }
 
-QLabel[boldLabel="true"] {
-    font-weight: bold;
+QTableWidget#ffMarkerTable::item {
+    padding: 1px 6px;
 }
 
-/* Ручное управление: карточка ППМ и поле обзора */
-QWidget#ppmCard {
-    background: #f7f9fc;
-    border: 1px solid #dfe3e8;
-    border-radius: 10px;
+QTableWidget#ffMarkerTable QHeaderView::section {
+    font-family: "Segoe UI", sans-serif;
+    font-size: 8pt;
+    padding: 2px 6px;
 }
 
-QGraphicsView#ppmFieldView {
-    background: #ffffff;
-    border: 1px solid #e3e7ee;
-    border-radius: 8px;
+/* Верхняя панель и статусная строка (окно переехало на QMainWindow) */
+QToolBar {
+    background-color: #ffffff;
+    border: 0;
+    border-bottom: 1px solid #d8dee7;
+    padding: 6px 8px;
+    spacing: 6px;
 }
 
-/* Измерение лучей: таймеры прошедшего/оставшегося времени */
-QLabel#timeElapsed {
-    font-weight: bold;
-    color: ${ACCENT};
+QToolBar::separator {
+    background-color: #e2e8f0;
+    width: 1px;
+    margin: 3px 7px;
 }
 
-QLabel#timeRemaining {
-    font-weight: bold;
-    color: ${STATUS_WARNING_ICON};
+QStatusBar {
+    background-color: #ffffff;
+    border-top: 1px solid #d8dee7;
+}
+
+QStatusBar::item {
+    border: 0;
+}
+
+QSplitter::handle:horizontal {
+    background-color: transparent;
+    margin: 0 3px;
+    border-left: 1px solid #e2e8f0;
+}
+
+QSplitter::handle:horizontal:hover {
+    border-left: 1px solid ${ACCENT_SOFT_BORDER};
 }

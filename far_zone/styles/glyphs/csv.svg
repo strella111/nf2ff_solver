@@ -1,0 +1,5 @@
+<!-- Экспорт данных в CSV: лист-таблица. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+  <rect x="4.4" y="2.6" width="15.2" height="18.8" rx="2.2"/>
+  <path d="M4.4 8.6h15.2M12 8.6v12.8M8.2 15h7.6" stroke-opacity=".85"/>
+</svg>

@@ -1,0 +1,6 @@
+<!-- Главный максимум: точка на вершине лепестка + отвес к оси. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M2.2 20.6C6 20.6 7 7.2 12 7.2s6 13.4 9.8 13.4"/>
+  <path d="M12 9.6v11" stroke-dasharray="2.3 2.2" stroke-opacity=".5"/>
+  <circle cx="12" cy="7.2" r="2.15" fill="currentColor" stroke="none"/>
+</svg>

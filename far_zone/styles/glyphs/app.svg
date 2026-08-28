@@ -1,0 +1,7 @@
+<!-- Иконка приложения: сечение ДН на акцентной плашке. Цвета фиксированы (не перекрашивается). -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+  <rect width="64" height="64" rx="14" fill="#4f46e5"/>
+  <path d="M6 50c4 0 5-11 9-11s5 11 9 11c5 0 5.5-38 8-38s3 38 8 38c4 0 5-11 9-11s5 11 9 11"
+        stroke="#ffffff" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M6 50h52" stroke="#ffffff" stroke-width="2.2" stroke-opacity=".55" stroke-linecap="round"/>
+</svg>

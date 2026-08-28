@@ -58,9 +58,14 @@ def _fix_qt_paths_with_cyrillic():
 
 _fix_qt_paths_with_cyrillic()
 
-# Тема (theme.qss + иконки) и шрифты иконок qtawesome
+# Тема (theme.qss + глифы интерфейса) и шрифты иконок qtawesome
 datas = [('far_zone/styles', 'far_zone/styles')]
 datas += collect_data_files('qtawesome')
+
+# Иконка самого exe: готовится build_icon.py из far_zone/styles/glyphs/app.svg.
+# Если её нет (собирали не через build.py) — exe получит иконку по умолчанию.
+_icon_file = pathlib.Path(SPECPATH) / 'build' / 'FarZone.ico'
+exe_icon = str(_icon_file) if _icon_file.exists() else None
 
 a = Analysis(
     ['main.py'],
@@ -82,6 +87,7 @@ exe = EXE(
     a.datas,
     [],
     name=f'FarZone-{__version__}',
+    icon=exe_icon,
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

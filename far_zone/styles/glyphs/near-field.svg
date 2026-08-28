@@ -1,0 +1,12 @@
+<!-- Ближнее поле: 2D-карта по апертуре (сетка точек скана). -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+  <rect x="3.2" y="3.2" width="5.8" height="5.8" rx="1.2"/>
+  <rect x="9.4" y="3.2" width="5.8" height="5.8" rx="1.2" fill="currentColor" fill-opacity=".35" stroke="none"/>
+  <rect x="15.6" y="3.2" width="5.8" height="5.8" rx="1.2"/>
+  <rect x="3.2" y="9.4" width="5.8" height="5.8" rx="1.2" fill="currentColor" fill-opacity=".35" stroke="none"/>
+  <rect x="9.4" y="9.4" width="5.8" height="5.8" rx="1.2" fill="currentColor" stroke="none"/>
+  <rect x="15.6" y="9.4" width="5.8" height="5.8" rx="1.2" fill="currentColor" fill-opacity=".35" stroke="none"/>
+  <rect x="3.2" y="15.6" width="5.8" height="5.8" rx="1.2"/>
+  <rect x="9.4" y="15.6" width="5.8" height="5.8" rx="1.2" fill="currentColor" fill-opacity=".35" stroke="none"/>
+  <rect x="15.6" y="15.6" width="5.8" height="5.8" rx="1.2"/>
+</svg>

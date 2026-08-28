@@ -34,30 +34,46 @@ from loguru import logger
 from .nf2ff_solver import solve_sections, find_peak_indices, side_lobe_level
 from .beam_loader import (load_beam_pattern_results, load_single_beam_file,
                           BeamFileFormatError, LoadCancelled)
-from .beam_mapping import beam_to_angles
+from .beam_mapping import (beam_to_angles, order_beams, BEAM_ORDER_NUMBER,
+                           BEAM_ORDER_AZIMUTH, BEAM_ORDER_ELEVATION)
 from .near_field_panel import NearFieldPanel
 from .app_style import reserve_bold_width
 from .icon_utils import set_button_icon, app_icon
-from .design_tokens import ACCENT, STATUS_ICON
+from .design_tokens import (ICON_DEFAULT, ICON_MD, ICON_ON_ACCENT, ICON_SM,
+                            MARKER_H, MARKER_PEAK, MARKER_V, MASK_LINE,
+                            OVERLAY_COLORS, PLOT_AXIS_MUTED, PLOT_BG,
+                            PLOT_TITLE, STATUS_ICON, TRACE_AZ_AMP,
+                            TRACE_AZ_PHASE, TRACE_EL_AMP, TRACE_EL_PHASE)
 
-AZ_COLOR = ACCENT
-EL_COLOR = '#059669'
-PHASE_AZ_COLOR = STATUS_ICON['fail']   # красный
-PHASE_EL_COLOR = '#d97706'             # янтарный
-MASK_COLOR = '#dc2626'                 # линия маски УБЛ
-MARKER_V_COLOR = '#111827'             # обычный вертикальный маркер
-MARKER_H_COLOR = '#7c3aed'             # обычный горизонтальный маркер
-PEAK_COLOR = '#db2777'                 # маркер поиска максимума (магнитится к пикам)
+# Цвета берутся из design_tokens (там же видно, почему они разведены именно так).
+AZ_COLOR = TRACE_AZ_AMP
+EL_COLOR = TRACE_EL_AMP
+PHASE_AZ_COLOR = TRACE_AZ_PHASE
+PHASE_EL_COLOR = TRACE_EL_PHASE
+MASK_COLOR = MASK_LINE                 # линия маски УБЛ
+MARKER_V_COLOR = MARKER_V              # обычный вертикальный маркер
+MARKER_H_COLOR = MARKER_H              # обычный горизонтальный маркер
+PEAK_COLOR = MARKER_PEAK               # маркер поиска максимума (магнитится к пикам)
 MARKER_WIDTH = 1.8                     # толщина линии маркеров (была 1)
 PEAK_WIDTH = 2.4                       # маркер-максимум чуть толще обычных
+TRACE_WIDTH = 2.4                      # амплитуда — сплошная
+PHASE_WIDTH = 2.0                      # фаза — штриховая, чуть тоньше
 DEG = np.pi / 180
-OVERLAY_COLORS = ['#7c3aed', '#0891b2', '#d97706', '#475467', '#e11d48', '#059669', '#2563eb']
 STEP_TO_M = 1e-2  # шаг сканера: см -> метры
 
 
 def angle_axis(left, right, step):
     """Сетка углов (град) — той же формулой, что и солвер (совпадает по длине)."""
     return np.degrees(np.arange(left * DEG, right * DEG + step * DEG, step * DEG))
+
+
+def _csv_num(value):
+    """Число для CSV; углы вне действительного окна (NaN) — пустая ячейка.
+
+    Писать «nan» текстом нельзя: Excel принимает такую колонку за строковую и
+    не строит по ней график. Пустая ячейка — как в экспорте карты ближнего поля.
+    """
+    return '' if not np.isfinite(value) else f'{value:.4f}'
 
 
 # ============================================================ Окно параметров
@@ -145,7 +161,11 @@ class FarFieldParamsDialog(QtWidgets.QDialog):
 
         buttons = QtWidgets.QDialogButtonBox(
             QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
-        buttons.button(QtWidgets.QDialogButtonBox.Ok).setText('Рассчитать')
+        ok_button = buttons.button(QtWidgets.QDialogButtonBox.Ok)
+        ok_button.setText('Рассчитать')
+        # Главное действие окна — заливка акцентом (см. theme.qss, primary).
+        ok_button.setProperty('primary', True)
+        ok_button.setDefault(True)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         root.addWidget(buttons)
@@ -361,10 +381,16 @@ class _FarFieldWorker(QtCore.QObject):
 class FarFieldPlotPanel(QtWidgets.QWidget):
     """График с двумя осями Y: слева амплитуда (дБ), справа фаза (°).
 
-    trace_defs: список (name, color, axis), axis ∈ {'L','R'} — левая/правая ось.
-    Левые трассы считаются амплитудными (к ним применяются нормировка и поиск
-    максимумов). Линии-маркеры (верт./гориз.) показывают значения пересечения с
-    трассами: ПКМ по линии — удалить, двойной клик — ввести точное значение.
+    trace_defs: список (name, color, axis, dashed), axis ∈ {'L','R'} —
+    левая/правая ось. Левые трассы считаются амплитудными (к ним применяются
+    нормировка и поиск максимумов). Линии-маркеры (верт./гориз.) показывают
+    значения пересечения с трассами: ПКМ по линии — удалить, двойной клик —
+    ввести точное значение.
+
+    Кодировка: ТОН = плоскость (Az/El), НАЧЕРТАНИЕ = величина (амплитуда
+    сплошная, фаза штриховая). Раньше все четыре трассы были сплошными и
+    различались только цветом — по какой оси читать кривую, приходилось
+    вспоминать.
     """
 
     def __init__(self, trace_defs, left_unit='дБ', left_range=(-60, 0),
@@ -384,10 +410,10 @@ class FarFieldPlotPanel(QtWidgets.QWidget):
         self._cursors = []      # [{line, kind, dotsL, dotsR, labelsL, labelsR}]
         self._overlays = []     # [[curve, vb, name]]
         self._hover_text = ''
-        self._cursor_text = ''
         self._overlay_count = 0
         self._vis_btns = {}
         self._peak_cursor = None
+        self._active_cursor = None   # выделенная строка таблицы = подсвеченная линия
         self._mask_line = None
         self._mask_db = None
 
@@ -408,6 +434,7 @@ class FarFieldPlotPanel(QtWidgets.QWidget):
         self.readout.setObjectName('ffReadout')
         self.readout.setMinimumHeight(16)
         plot_area.addWidget(self.readout)
+        plot_area.addWidget(self._build_marker_table())
         root.addLayout(plot_area, 1)
 
         self._build_traces(trace_defs)
@@ -419,10 +446,10 @@ class FarFieldPlotPanel(QtWidgets.QWidget):
     # ------------------------------------------------------------- построение
     def _build_plot(self, left_unit, left_range, right_unit, right_range):
         self.plot = pg.PlotWidget()
-        self.plot.setBackground('#fbfcff')
+        self.plot.setBackground(PLOT_BG)
         pi = self.plot.getPlotItem()
         self._pi = pi
-        pi.setTitle('Дальняя зона: амплитуда (дБ) · фаза (°)', color='#1f2937', size='11pt')
+        pi.setTitle('Дальняя зона: амплитуда (дБ) · фаза (°)', color=PLOT_TITLE, size='11pt')
         pi.showGrid(x=True, y=True, alpha=0.22)
         pi.setMenuEnabled(False)
         pi.setLabel('bottom', 'Угол, °')
@@ -437,9 +464,12 @@ class FarFieldPlotPanel(QtWidgets.QWidget):
         pi.getAxis('right').linkToView(self.vbR)
         self.vbR.setXLink(pi)
         self.vbR.setMouseEnabled(x=False, y=False)
+        # Ось нейтральная: на ней ДВЕ трассы (Az и El), и красить её в цвет
+        # одной из них — значит утверждать неверное соответствие.
+        # Принадлежность к оси теперь видна по штриховке трасс.
         ax_r = pi.getAxis('right')
-        ax_r.setLabel(right_unit, color=PHASE_EL_COLOR)
-        ax_r.setTextPen(pg.mkPen(PHASE_EL_COLOR))
+        ax_r.setLabel(right_unit, color=PLOT_AXIS_MUTED)
+        ax_r.setTextPen(pg.mkPen(PLOT_AXIS_MUTED))
         self.vbR.setYRange(*right_range)
 
         self.vbL.sigResized.connect(self._sync_views)
@@ -453,10 +483,13 @@ class FarFieldPlotPanel(QtWidgets.QWidget):
 
     def _build_traces(self, trace_defs):
         self._traces = []
-        for name, color, axis in trace_defs:
+        for name, color, axis, dashed in trace_defs:
+            if dashed:
+                pen = pg.mkPen(color, width=PHASE_WIDTH, style=QtCore.Qt.DashLine)
+            else:
+                pen = pg.mkPen(color, width=TRACE_WIDTH)
             # connect='finite' — рвать линию на NaN (обрезанные нефизичные участки ДН)
-            curve = pg.PlotDataItem([], [], pen=pg.mkPen(color, width=2.4), name=name,
-                                    connect='finite')
+            curve = pg.PlotDataItem([], [], pen=pen, name=name, connect='finite')
             vb = self.vbL if axis == 'L' else self.vbR
             vb.addItem(curve)
             self.legend.addItem(curve, name)
@@ -484,11 +517,12 @@ class FarFieldPlotPanel(QtWidgets.QWidget):
         self.plot.addItem(self.vline, ignoreBounds=True)
 
     # --------------------------------------------------- инструменты (слева)
-    def _icon_btn(self, icon, tip, slot, checkable=False, shortcut=None):
+    def _icon_btn(self, icon, tip, slot, checkable=False, shortcut=None,
+                  color=ICON_DEFAULT, color_on=None):
         btn = QtWidgets.QToolButton()
         btn.setProperty('plotTool', True)
-        btn.setIcon(app_icon(icon))
-        btn.setIconSize(QtCore.QSize(18, 18))
+        btn.setIcon(app_icon(icon, color=color, color_on=color_on))
+        btn.setIconSize(QtCore.QSize(ICON_MD, ICON_MD))
         if shortcut:
             btn.setShortcut(QtGui.QKeySequence(shortcut))
             tip = f'{tip}  [{shortcut}]'
@@ -499,29 +533,457 @@ class FarFieldPlotPanel(QtWidgets.QWidget):
         btn.clicked.connect(slot)
         return btn
 
+    @staticmethod
+    def _tool_separator():
+        """Тонкая черта между группами инструментов (маркеры | вид | экспорт)."""
+        line = QtWidgets.QWidget()
+        line.setFixedHeight(1)
+        line.setStyleSheet('background-color: #e2e8f0;')
+        return line
+
     def _build_tools(self):
-        """Компактная вертикальная панель иконок-инструментов."""
+        """Компактная вертикальная панель иконок-инструментов.
+
+        Иконка красится в цвет того, что кнопка создаёт на графике: маркеры
+        видно по цвету линии, а не по памяти. Служебные (масштаб, экспорт)
+        остаются нейтральными — так группы отличаются сами собой.
+        """
         panel = QtWidgets.QWidget()
         panel.setFixedWidth(40)
         col = QtWidgets.QVBoxLayout(panel)
         col.setContentsMargins(2, 2, 2, 2)
         col.setSpacing(4)
 
-        col.addWidget(self._icon_btn('cursor-h', 'Добавить горизонтальный маркер (по амплитуде)', self._add_hcursor, shortcut='H'))
-        col.addWidget(self._icon_btn('cursor-v', 'Добавить вертикальный маркер', self._add_vcursor, shortcut='V'))
+        col.addWidget(self._icon_btn('cursor-h', 'Добавить горизонтальный маркер (по амплитуде)',
+                                     self._add_hcursor, shortcut='H', color=MARKER_H_COLOR))
+        col.addWidget(self._icon_btn('cursor-v', 'Добавить вертикальный маркер',
+                                     self._add_vcursor, shortcut='V', color=MARKER_V_COLOR))
         col.addWidget(self._icon_btn('max-global', 'Маркер максимума (отдельный цвет): в главный максимум амплитуды.\n'
-                                                   'Перетаскивание маркера притягивается к ближайшему максимуму', self._marker_to_max, shortcut='M'))
+                                                   'Перетаскивание маркера притягивается к ближайшему максимуму',
+                                     self._marker_to_max, shortcut='M', color=PEAK_COLOR))
         col.addWidget(self._icon_btn('max-local', 'Маркер максимума: следующий локальный максимум по кругу.\n'
-                                                  'Перетаскивание маркера притягивается к ближайшему максимуму', self._next_local_max, shortcut='Shift+M'))
+                                                  'Перетаскивание маркера притягивается к ближайшему максимуму',
+                                     self._next_local_max, shortcut='Shift+M', color=PEAK_COLOR))
+        col.addWidget(self._icon_btn('clear-markers', 'Убрать все маркеры',
+                                     self.clear_annotations, shortcut='Shift+C'))
+        col.addWidget(self._tool_separator())
         col.addWidget(self._icon_btn('autoscale', 'Автомасштаб по данным', self.autoscale, shortcut='A'))
-        self.norm_btn = self._icon_btn('normalize', 'Нормировка амплитуды к максимуму (дБ)', self._toggle_norm, checkable=True, shortcut='N')
+        self.norm_btn = self._icon_btn('normalize', 'Нормировка амплитуды к максимуму (дБ)',
+                                       self._toggle_norm, checkable=True, shortcut='N',
+                                       color_on=AZ_COLOR)
         self.norm_btn.setChecked(self._normalize)
         col.addWidget(self.norm_btn)
-        col.addSpacing(8)
+        col.addWidget(self._tool_separator())
         col.addWidget(self._icon_btn('csv', 'Экспорт данных в CSV', self._export_csv))
         col.addWidget(self._icon_btn('png', 'Экспорт графика в PNG', self._export_png))
         col.addStretch(1)
         return panel
+
+    # ------------------------------------------------------- таблица маркеров
+    def _marker_columns(self):
+        """Колонки таблицы: [(вид, имя трассы, цвет, штриховая)].
+
+        Δ стоит СВОЕЙ колонкой сразу за каждой амплитудной трассой. Раньше
+        дельта была одна на всю строку, а горизонтальный маркер режет оба
+        главных сечения: ширины у них разные (в Az апертура втрое длиннее —
+        луч уже), и в единственную ячейку попадала ширина того сечения, что
+        считалось последним. Вторая молча пропадала.
+        """
+        cols = [('title', None, None, False), ('pos', None, None, False)]
+        for name, color, axis, dashed in self._trace_defs:
+            cols.append(('trace', name, color, dashed))
+            if axis == 'L':          # Δ есть только у амплитуд: уровень маркера — по левой оси
+                cols.append(('delta', name, color, dashed))
+        return cols
+
+    @staticmethod
+    def _column_title(kind, name):
+        if kind == 'title':
+            return 'Маркер'
+        if kind == 'pos':
+            return 'Позиция'
+        if kind == 'trace':
+            return name
+        return 'Δ ' + name.split()[0]      # «Az ампл.» -> «Δ Az»
+
+    @staticmethod
+    def _line_swatch(color, dashed=False, width=22, height=12):
+        """Чип с отрезком линии — как в легенде: тон и начертание.
+
+        Цвет текста в ячейке съедается на светлых оттенках и не виден в
+        заголовке (его красит QSS), а чип читается одинаково везде.
+        """
+        # Рисуем в физических пикселях экрана: на 125–150 % масштабе Windows
+        # чип 22×12 иначе растягивается и мылится
+        screen = QtWidgets.QApplication.primaryScreen() if QtWidgets.QApplication.instance() else None
+        ratio = float(screen.devicePixelRatio()) if screen is not None else 1.0
+        pm = QtGui.QPixmap(int(width * ratio), int(height * ratio))
+        pm.setDevicePixelRatio(ratio)
+        pm.fill(QtCore.Qt.transparent)
+        painter = QtGui.QPainter(pm)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing)
+        pen = QtGui.QPen(QtGui.QColor(color))
+        pen.setWidthF(2.4)
+        pen.setCapStyle(QtCore.Qt.FlatCap)
+        if dashed:
+            pen.setStyle(QtCore.Qt.CustomDashLine)
+            pen.setDashPattern([2.0, 1.6])
+        painter.setPen(pen)
+        painter.drawLine(1, height // 2, width - 1, height // 2)
+        painter.end()
+        return QtGui.QIcon(pm)
+
+    def _swatch(self, color, dashed=False):
+        """Чип с кэшем: таблица перерисовывается на каждый сдвиг маркера."""
+        key = (color, dashed)
+        if key not in self._swatches:
+            self._swatches[key] = self._line_swatch(color, dashed)
+        return self._swatches[key]
+
+    def _build_marker_table(self):
+        """Значения маркеров таблицей, как в анализаторах цепей.
+
+        Раньше всё сваливалось в одну строку под графиком: с четырьмя трассами
+        и парой курсоров она была длиннее окна, а QLabel режет текст без
+        многоточия — конец просто пропадал.
+        """
+        self._marker_cols = self._marker_columns()
+        self._swatches = {}
+        table = QtWidgets.QTableWidget(0, len(self._marker_cols))
+        table.setObjectName('ffMarkerTable')
+        table.setHorizontalHeaderLabels(
+            [self._column_title(kind, name) for kind, name, _c, _d in self._marker_cols])
+        for column, (kind, name, color, dashed) in enumerate(self._marker_cols):
+            head = table.horizontalHeaderItem(column)
+            if kind == 'trace':
+                head.setIcon(self._swatch(color, dashed))
+                head.setToolTip(f'«{name}» в точке маркера.\n'
+                                'Для горизонтального маркера — углы пересечения трассы с его уровнем')
+            elif kind == 'delta':
+                head.setIcon(self._swatch(color, dashed))
+                head.setToolTip(f'Δ по трассе «{name}»:\n'
+                                '• горизонтальный маркер — ширина по его уровню вокруг максимума;\n'
+                                '• вертикальный маркер — разница с опорным маркером')
+        table.verticalHeader().setVisible(False)
+        table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        table.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
+        table.setAlternatingRowColors(True)
+        table.setWordWrap(False)
+        table.setMaximumHeight(150)
+        header = table.horizontalHeader()
+        header.setSectionResizeMode(QtWidgets.QHeaderView.Stretch)
+        header.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeToContents)
+        header.setDefaultAlignment(QtCore.Qt.AlignCenter)
+        table.setToolTip('Строка на маркер. Клик по строке подсвечивает линию на графике,\n'
+                         'Del — убрать маркер')
+        table.installEventFilter(self)
+        table.itemSelectionChanged.connect(self._sync_active_cursor)
+        table.hide()             # пока маркеров нет, место не занимаем
+        self.marker_table = table
+        return table
+
+    def eventFilter(self, obj, event):
+        """Del в таблице убирает выбранный маркер.
+
+        Попасть правым кликом в линию шириной 8 px на графике трудно, а строку
+        выбрать легко.
+        """
+        if (obj is getattr(self, 'marker_table', None)
+                and event.type() == QtCore.QEvent.KeyPress
+                and event.key() in (QtCore.Qt.Key_Delete, QtCore.Qt.Key_Backspace)):
+            row = obj.currentRow()
+            if 0 <= row < len(self._cursors):
+                self._remove_cursor(self._cursors[row])
+            return True
+        return super().eventFilter(obj, event)
+
+    def _cursor_title(self, cur, index):
+        if cur.get('peak'):
+            return 'Макс'
+        kind = 'V' if cur['kind'] == 'v' else 'H'
+        same = [c for c in self._cursors[:index]
+                if c['kind'] == cur['kind'] and not c.get('peak')]
+        return f'{kind}{len(same) + 1}'
+
+    def _cursor_index(self, cur):
+        """Номер маркера в списке (по тождеству: записи — словари)."""
+        for index, other in enumerate(self._cursors):
+            if other is cur:
+                return index
+        return -1
+
+    def _ref_cursor(self):
+        """Опорный маркер для Δ вертикальных: маркер максимума, иначе первый V."""
+        if self._peak_cursor is not None and self._cursor_index(self._peak_cursor) >= 0:
+            return self._peak_cursor
+        for cur in self._cursors:
+            if cur['kind'] == 'v':
+                return cur
+        return None
+
+    def _trace_by_name(self, name):
+        for trace in self._traces:
+            if trace['name'] == name:
+                return trace
+        return None
+
+    def _trace_value(self, trace, angle):
+        """Значение трассы под углом (None — нет данных или обрезанный участок)."""
+        if trace['x'].size == 0:
+            return None
+        y = float(np.interp(angle, trace['x'], self._disp(trace)))
+        return y if np.isfinite(y) else None
+
+    def _lobe_width(self, trace, level):
+        """(ширина, все пересечения) трассы с уровнем.
+
+        Ширина считается по паре пересечений ВОКРУГ максимума трассы. Когда
+        уровень маркера ниже боковых лепестков, пересечений больше двух, и
+        «крайнее минус крайнее» дало бы не ширину луча, а размах по всем
+        лепесткам — то есть заведомо неверную ширину.
+        """
+        disp = self._disp(trace)
+        crossings = self._crossings(trace['x'], disp, level)
+        if len(crossings) < 2:
+            return None, crossings
+        finite = np.where(np.isfinite(disp), disp, -np.inf)
+        x_max = float(trace['x'][int(np.argmax(finite))])
+        left = [c for c in crossings if c <= x_max]
+        right = [c for c in crossings if c >= x_max]
+        if left and right:
+            return min(right) - max(left), crossings
+        return max(crossings) - min(crossings), crossings
+
+    # Тексты-заглушки: их красим приглушённо, чтобы цифры не тонули среди прочерков.
+    EMPTY = '—'
+    REF_MARK = 'опора'
+    NO_CROSS = 'нет пересеч.'
+    _MUTED = (EMPTY, REF_MARK, NO_CROSS)
+
+    @staticmethod
+    def _fmt_value(value, unit, sign=False):
+        """Значение с единицей: у градуса пробела перед знаком не бывает."""
+        number = f'{value:+.2f}' if sign else f'{value:.2f}'
+        return f'{number}{unit}' if unit == '°' else f'{number} {unit}'
+
+    def _crossings_text(self, crossings):
+        if not crossings:
+            return self.NO_CROSS
+        if len(crossings) <= 3:
+            return ' / '.join(f'{x:.2f}°' for x in crossings)
+        # больше трёх в ячейку не влезает — полный список уходит в подсказку
+        return f'{crossings[0]:.2f}° … {crossings[-1]:.2f}° ({len(crossings)} шт.)'
+
+    def _cursor_hint(self, cur, title, value):
+        if cur.get('peak'):
+            what = f'маркер максимума, {value:.3f}° (магнитится к локальным максимумам)'
+        elif cur['kind'] == 'v':
+            what = f'вертикальный маркер, {value:.3f}°'
+        else:
+            what = f'горизонтальный маркер, уровень {value:.2f} {self._left_unit}'
+        return (f'{title} — {what}.\n'
+                'Выделить строку — линия на графике станет сплошной и толще. Del — убрать маркер')
+
+    def _vcursor_cells(self, cur, title, angle):
+        """Ячейки вертикального маркера: значение трассы и Δ к опорному маркеру."""
+        ref = self._ref_cursor()
+        ref_title, ref_angle = '', None
+        if ref is not None and ref is not cur:
+            ref_title = self._cursor_title(ref, self._cursor_index(ref))
+            ref_angle = float(ref['line'].value())
+
+        cells = {}
+        for name, _color, axis, _dashed in self._trace_defs:
+            trace = self._trace_by_name(name)
+            if trace is None or not trace['visible'] or trace['x'].size == 0:
+                hidden = (self.EMPTY, f'«{name}»: трасса скрыта или не рассчитана')
+                cells[('trace', name)] = hidden
+                if axis == 'L':
+                    cells[('delta', name)] = hidden
+                continue
+
+            value = self._trace_value(trace, angle)
+            if value is None:
+                cells[('trace', name)] = (self.EMPTY,
+                                          f'«{name}»: в {angle:.3f}° значения нет '
+                                          '(обрезанный нефизичный участок ДН)')
+            else:
+                cells[('trace', name)] = (self._fmt_value(value, trace['unit']),
+                                          f'«{name}» в {angle:.3f}°')
+            if axis != 'L':
+                continue
+
+            if ref_angle is None:
+                cells[('delta', name)] = (
+                    self.REF_MARK,
+                    'Опорный маркер: от него считаются Δ остальных вертикальных.\n'
+                    'Опорным берётся маркер максимума, а если его нет — первый вертикальный')
+                continue
+            ref_value = self._trace_value(trace, ref_angle)
+            if value is None or ref_value is None:
+                cells[('delta', name)] = (self.EMPTY,
+                                          f'«{name}»: на одном из маркеров значения нет')
+            else:
+                diff = self._fmt_value(value - ref_value, trace['unit'], sign=True)
+                cells[('delta', name)] = (
+                    diff, f'«{name}»: {title} − {ref_title} = {diff}')
+        return cells
+
+    def _hcursor_cells(self, level):
+        """Ячейки горизонтального маркера: углы пересечения и ширина по уровню."""
+        cells = {}
+        for name, _color, axis, _dashed in self._trace_defs:
+            if axis != 'L':
+                cells[('trace', name)] = (
+                    self.EMPTY,
+                    'Горизонтальный маркер задан по левой оси (амплитуда) —\n'
+                    f'с фазовой трассой «{name}» он не пересекается')
+                continue
+            trace = self._trace_by_name(name)
+            if trace is None or not trace['visible'] or trace['x'].size == 0:
+                hidden = (self.EMPTY, f'«{name}»: трасса скрыта или не рассчитана')
+                cells[('trace', name)] = hidden
+                cells[('delta', name)] = hidden
+                continue
+
+            width, crossings = self._lobe_width(trace, level)
+            if crossings:
+                tip = (f'«{name}» пересекает уровень {level:.2f} {self._left_unit} в:\n'
+                       + ', '.join(f'{x:.3f}°' for x in crossings))
+            else:
+                tip = f'«{name}» не доходит до уровня {level:.2f} {self._left_unit}'
+            cells[('trace', name)] = (self._crossings_text(crossings), tip)
+
+            if width is None:
+                cells[('delta', name)] = (
+                    self.EMPTY,
+                    f'«{name}»: пересечений меньше двух — ширину считать не по чему')
+            else:
+                cells[('delta', name)] = (
+                    f'{width:.3f}°',
+                    f'«{name}»: ширина по уровню {level:.2f} {self._left_unit}\n'
+                    'между пересечениями вокруг максимума трассы')
+        return cells
+
+    def _cursor_row(self, cur, index):
+        """Строка таблицы: [(текст, подсказка)] в порядке self._marker_cols."""
+        value = float(cur['line'].value())
+        title = self._cursor_title(cur, index)
+        if cur['kind'] == 'v':
+            body = self._vcursor_cells(cur, title, value)
+            position = (f'{value:.3f}°', f'{title}: угол маркера')
+        else:
+            body = self._hcursor_cells(value)
+            position = (f'{value:.2f} {self._left_unit}', f'{title}: уровень маркера')
+
+        head = (title, self._cursor_hint(cur, title, value))
+        row = []
+        for kind, name, _color, _dashed in self._marker_cols:
+            if kind == 'title':
+                row.append(head)
+            elif kind == 'pos':
+                row.append(position)
+            else:
+                row.append(body.get((kind, name), (self.EMPTY, '')))
+        return row
+
+    def _fill_marker_table(self):
+        table = self.marker_table
+        blocked = table.blockSignals(True)   # перезаполнение не должно сбивать выделение
+        table.setRowCount(len(self._cursors))
+        for row, cur in enumerate(self._cursors):
+            cells = self._cursor_row(cur, row)
+            for column, (kind, _name, color, _dashed) in enumerate(self._marker_cols):
+                text, tip = cells[column]
+                item = QtWidgets.QTableWidgetItem(text)
+                item.setToolTip(tip)
+                item.setTextAlignment(QtCore.Qt.AlignCenter)
+                if kind == 'title':
+                    # Тот же чип, что и на линии: по нему строка находится глазами
+                    item.setIcon(self._swatch(cur['color'], dashed=True))
+                    item.setTextAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
+                    item.setForeground(QtGui.QBrush(QtGui.QColor(cur['color'])))
+                    font = item.font()
+                    font.setBold(True)
+                    item.setFont(font)
+                elif text in self._MUTED:
+                    item.setForeground(QtGui.QBrush(QtGui.QColor(PLOT_AXIS_MUTED)))
+                elif kind in ('trace', 'delta'):
+                    item.setForeground(QtGui.QBrush(QtGui.QColor(color)))
+                    if kind == 'delta':
+                        font = item.font()
+                        font.setBold(True)     # ширина/разница — то, ради чего маркер и ставят
+                        item.setFont(font)
+                table.setItem(row, column, item)
+        table.resizeRowsToContents()
+        table.setVisible(bool(self._cursors))
+        self._restore_marker_selection()
+        table.blockSignals(blocked)
+        self._sync_marker_labels()
+        self._apply_marker_pens()
+
+    # --------------------------------------------- связь «строка ↔ линия»
+    def _restore_marker_selection(self):
+        """Вернуть выделение на ту же линию после перезаполнения таблицы."""
+        table = self.marker_table
+        row = self._cursor_index(self._active_cursor) if self._active_cursor is not None else -1
+        if row < 0:
+            self._active_cursor = None
+            table.clearSelection()
+        elif table.currentRow() != row:
+            table.selectRow(row)
+
+    def _sync_active_cursor(self):
+        row = self.marker_table.currentRow()
+        self._active_cursor = self._cursors[row] if 0 <= row < len(self._cursors) else None
+        self._apply_marker_pens()
+
+    def _select_cursor_row(self, cur):
+        """Клик по линии на графике — выделить её строку (обратная связь к таблице)."""
+        row = self._cursor_index(cur)
+        if row >= 0:
+            self.marker_table.selectRow(row)
+
+    def _apply_marker_pens(self):
+        """Выделенная строка = подсвеченная линия: сплошная и толще.
+
+        Подписи на линиях отвечают на «где какой маркер» при беглом взгляде,
+        подсветка — когда маркеров полдюжины и подписи стоят рядом.
+        """
+        for cur in self._cursors:
+            active = cur is self._active_cursor
+            if cur.get('active') == active:
+                continue      # таблица перезаполняется на каждый сдвиг линии
+            cur['active'] = active
+            base = PEAK_WIDTH if cur.get('peak') else MARKER_WIDTH
+            cur['line'].setPen(pg.mkPen(
+                cur['color'], width=base + (1.4 if active else 0),
+                style=QtCore.Qt.SolidLine if active else QtCore.Qt.DashLine))
+
+    def _sync_marker_labels(self):
+        """Подпись на самой линии: «H1 · -3.00 дБ».
+
+        Имена в таблице бесполезны, пока линии на графике безымянные: два
+        вертикальных маркера выглядят одинаково, и какой из них V2 — непонятно.
+        Имена зависят от порядка, поэтому пересобираются при каждом обновлении.
+        """
+        for index, cur in enumerate(self._cursors):
+            label = getattr(cur['line'], 'label', None)
+            if label is None:
+                continue
+            title = self._cursor_title(cur, index)
+            unit = '°' if cur['kind'] == 'v' else f' {self._left_unit}'
+            fmt = f'{title} · {{value:0.2f}}{unit}'
+            if cur.get('label_fmt') == fmt:
+                continue      # значение подпись пересчитывает сама, при сдвиге линии
+            cur['label_fmt'] = fmt
+            label.setFormat(fmt)
+            if not label.isVisible():
+                # setFormat перерисовывает подпись только у видимой линии,
+                # а таблица заполняется и до показа окна
+                label.setText(fmt.format(value=float(cur['line'].value())))
 
     def _build_plane_bar(self):
         """Тумблеры видимости трасс — в правом верхнем углу над графиком."""
@@ -530,7 +992,7 @@ class FarFieldPlotPanel(QtWidgets.QWidget):
         bar.setSpacing(4)
         bar.addStretch(1)
         bar.addWidget(QtWidgets.QLabel('Трассы:'))
-        for name, color, _axis in self._trace_defs:
+        for name, color, _axis, _dashed in self._trace_defs:
             btn = QtWidgets.QToolButton()
             btn.setText(name)
             btn.setCheckable(True)
@@ -690,18 +1152,25 @@ class FarFieldPlotPanel(QtWidgets.QWidget):
         else:
             color = MARKER_V_COLOR if kind == 'v' else MARKER_H_COLOR
         return {
-            'line': line, 'kind': kind, 'peak': peak,
+            'line': line, 'kind': kind, 'peak': peak, 'color': color,
             'dotsL': self._make_dots(self.vbL, color),
             'dotsR': self._make_dots(self.vbR, color),
             'labelsL': [], 'labelsR': [],
         }
+
+    @staticmethod
+    def _marker_label_opts(color, position):
+        """Подпись маркера — на плашке: над трассами голый текст не читался."""
+        return {'position': position, 'color': color, 'border': pg.mkPen(color, width=1),
+                'fill': pg.mkBrush(255, 255, 255, 235)}
 
     def _make_vcursor(self, x, peak=False):
         color = PEAK_COLOR if peak else MARKER_V_COLOR
         width = PEAK_WIDTH if peak else MARKER_WIDTH
         line = pg.InfiniteLine(pos=x, angle=90, movable=True,
                                pen=pg.mkPen(color, width=width, style=QtCore.Qt.DashLine),
-                               label='{value:0.2f}°', labelOpts={'position': 0.97, 'color': color})
+                               label='{value:0.2f}°',
+                               labelOpts=self._marker_label_opts(color, 0.97))
         line.sigPositionChanged.connect(self._update_intersections)
         if peak:
             # Маркер поиска максимума «магнитится» к локальным максимумам при сдвиге.
@@ -709,6 +1178,9 @@ class FarFieldPlotPanel(QtWidgets.QWidget):
         self.plot.addItem(line)
         cur = self._new_cursor_record(line, 'v', peak=peak)
         self._cursors.append(cur)
+        # тянут линию — подсвечиваем её строку: клик по графику при перетаскивании
+        # не приходит, и таблица иначе показывала бы выделенным другой маркер
+        line.sigDragged.connect(lambda _line, c=cur: self._select_cursor_row(c))
         return cur
 
     def _add_vcursor(self):
@@ -728,10 +1200,13 @@ class FarFieldPlotPanel(QtWidgets.QWidget):
                 y0 = float(np.nanmax(d0)) - 3.0
         line = pg.InfiniteLine(pos=y0, angle=0, movable=True,
                                pen=pg.mkPen(MARKER_H_COLOR, width=MARKER_WIDTH, style=QtCore.Qt.DashLine),
-                               label='{value:0.2f}', labelOpts={'position': 0.95, 'color': MARKER_H_COLOR})
+                               label='{value:0.2f}',
+                               labelOpts=self._marker_label_opts(MARKER_H_COLOR, 0.95))
         line.sigPositionChanged.connect(self._update_intersections)
         self.plot.addItem(line)
-        self._cursors.append(self._new_cursor_record(line, 'h'))
+        cur = self._new_cursor_record(line, 'h')
+        self._cursors.append(cur)
+        line.sigDragged.connect(lambda _line, c=cur: self._select_cursor_row(c))
         self._update_intersections()
 
     # ---------------------------------------------------- поиск максимумов
@@ -800,10 +1275,13 @@ class FarFieldPlotPanel(QtWidgets.QWidget):
             self.vbL.removeItem(lab)
         for lab in cur['labelsR']:
             self.vbR.removeItem(lab)
-        if cur in self._cursors:
-            self._cursors.remove(cur)
+        row = self._cursor_index(cur)
+        if row >= 0:
+            self._cursors.pop(row)
         if cur is self._peak_cursor:
             self._peak_cursor = None
+        if cur is self._active_cursor:
+            self._active_cursor = None
         self._update_intersections()
 
     def _cursor_near(self, scene_pos, thresh_px=8):
@@ -827,9 +1305,11 @@ class FarFieldPlotPanel(QtWidgets.QWidget):
                 if ev.button() == QtCore.Qt.RightButton:
                     self._remove_cursor(cur)
                     ev.accept()
-                elif ev.button() == QtCore.Qt.LeftButton and ev.double():
-                    self._edit_cursor(cur)
-                    ev.accept()
+                elif ev.button() == QtCore.Qt.LeftButton:
+                    self._select_cursor_row(cur)   # клик по линии подсвечивает её строку
+                    if ev.double():
+                        self._edit_cursor(cur)
+                        ev.accept()
                 return
             # Клик не по линии: двойной ЛКМ по полю графика — автомасштаб.
             if (ev.button() == QtCore.Qt.LeftButton and ev.double()
@@ -850,6 +1330,8 @@ class FarFieldPlotPanel(QtWidgets.QWidget):
         if ok:
             line.setValue(val)
 
+    # Точки и подписи НА графике. Числа для чтения — в таблице маркеров
+    # (см. _cursor_row), поэтому здесь только координаты и краткая подпись.
     def _v_points(self, x0):
         out = []
         for trace in self._visible_traces():
@@ -857,27 +1339,15 @@ class FarFieldPlotPanel(QtWidgets.QWidget):
             if not np.isfinite(y):     # обрезанный участок ДН — нет значения
                 continue
             out.append({'x': x0, 'y': y, 'axis': trace['axis'], 'color': trace['color'],
-                        'label': f'{y:.2f} {trace["unit"]}', 'summary': f"{trace['name']}={y:.2f}"})
+                        'label': f'{y:.2f} {trace["unit"]}'})
         return out
 
     def _h_points(self, level):
         out = []
         for trace in self._visible_amp_traces():
-            disp = self._disp(trace)
-            xs = self._crossings(trace['x'], disp, level)
-            if xs:
-                for xv in xs:
-                    out.append({'x': xv, 'y': level, 'axis': 'L',
-                                'color': trace['color'], 'label': f'{xv:.2f}°'})
-                summ = ", ".join(f"{v:.2f}°" for v in xs)
-                if len(xs) >= 2:
-                    summ += f" (Δ={max(xs) - min(xs):.2f}°)"
-                out[-1]['summary'] = f"{trace['name']}: {summ}"
-            elif np.any(np.isfinite(disp)):
-                i = int(np.nanargmin(np.abs(disp - level)))
-                out.append({'x': float(trace['x'][i]), 'y': float(disp[i]), 'axis': 'L',
-                            'color': trace['color'], 'label': f'≈{trace["x"][i]:.2f}°',
-                            'summary': f"{trace['name']}: ≈{trace['x'][i]:.2f}° (нет пересеч.)"})
+            for xv in self._crossings(trace['x'], self._disp(trace), level):
+                out.append({'x': xv, 'y': level, 'axis': 'L',
+                            'color': trace['color'], 'label': f'{xv:.2f}°'})
         return out
 
     def _sync_labels(self, store, points, vb):
@@ -908,25 +1378,21 @@ class FarFieldPlotPanel(QtWidgets.QWidget):
         cur['dotsR'].setData([p['x'] for p in right], [p['y'] for p in right])
         self._sync_labels(cur['labelsL'], left, self.vbL)
         self._sync_labels(cur['labelsR'], right, self.vbR)
-        return [p['summary'] for p in points if 'summary' in p]
 
     def _update_intersections(self):
-        parts = []
+        """Точки и подписи на графике + строки в таблице маркеров."""
         for cur in self._cursors:
             val = float(cur['line'].value())
             points = self._v_points(val) if cur['kind'] == 'v' else self._h_points(val)
-            summ = self._render_intersection(cur, points)
-            tag = 'Верт.' if cur['kind'] == 'v' else 'Гориз.'
-            if summ:
-                parts.append(f"{tag} {val:.2f}: " + "; ".join(summ))
-        self._cursor_text = "   |   ".join(parts)
-        self._update_readout()
+            self._render_intersection(cur, points)
+        self._fill_marker_table()
 
     def clear_annotations(self):
         for cur in list(self._cursors):
             self._remove_cursor(cur)
         self._cursors = []
-        self._cursor_text = ''
+        self._active_cursor = None
+        self._fill_marker_table()
         self._update_readout()
 
     # ------------------------------------------------- наведение (значение точки)
@@ -994,12 +1460,11 @@ class FarFieldPlotPanel(QtWidgets.QWidget):
             pass
 
     def _update_readout(self):
-        parts = []
-        if self._hover_text:
-            parts.append('▶ ' + self._hover_text)
-        if self._cursor_text:
-            parts.append(self._cursor_text)
-        self.readout.setText('      '.join(parts) if parts else ' ')
+        """Строка под графиком — только значение под курсором.
+
+        Значения маркеров ушли в таблицу: в одну строку они не помещались.
+        """
+        self.readout.setText('▶ ' + self._hover_text if self._hover_text else ' ')
 
     # ------------------------------------------------------------ экспорт
     def _export_png(self):
@@ -1013,40 +1478,72 @@ class FarFieldPlotPanel(QtWidgets.QWidget):
             logger.error(f'Ошибка экспорта PNG: {exc}')
             QtWidgets.QMessageBox.critical(self, 'Ошибка экспорта', str(exc))
 
+    def _csv_columns(self):
+        """Колонки для CSV: на каждую сетку углов свой столбец угла и её трассы.
+
+        Az и El считаются по разным сеткам, поэтому столбцов угла может быть два.
+        """
+        groups = []                      # [(сетка_углов, [трассы])]
+        for trace in self._traces:
+            if trace['x'].size == 0:
+                continue
+            for grid, members in groups:
+                if grid.size == trace['x'].size and np.allclose(grid, trace['x']):
+                    members.append(trace)
+                    break
+            else:
+                groups.append((trace['x'], [trace]))
+
+        columns = []
+        for grid, members in groups:
+            plane = members[0]['name'].split()[0]    # «Az ампл.» -> «Az»
+            columns.append((f'Угол {plane}, °', grid))
+            for trace in members:
+                columns.append((f'{trace["name"]}, {trace["unit"]}', self._disp(trace)))
+        return columns
+
     def _export_csv(self):
         if not any(t['x'].size for t in self._traces):
             return
         path, _ = QtWidgets.QFileDialog.getSaveFileName(self, 'Сохранить данные', 'far_field.csv', 'CSV (*.csv)')
         if not path:
             return
+        columns = self._csv_columns()
         try:
-            with open(path, 'w', newline='', encoding='utf-8') as f:
+            # Колонками, а не строками: у Excel предел 16384 столбца, и при мелком
+            # шаге по углу (±90° с шагом 0.005 — 36001 точка) хвост трассы молча
+            # пропадал. Плюс по колонкам строится график и читается pandas.
+            #
+            # utf-8-sig, а не utf-8: без BOM Excel на русской Windows читает файл
+            # как CP1251 и подписи столбцов превращаются в «CfPiPsP»».
+            with open(path, 'w', newline='', encoding='utf-8-sig') as f:
                 writer = csv.writer(f, delimiter=';')
-                for trace in self._traces:
-                    if trace['x'].size == 0:
-                        continue
-                    writer.writerow([f'{trace["name"]} угол, °'] + [f'{v:.4f}' for v in trace['x']])
-                    writer.writerow([f'{trace["name"]}, {trace["unit"]}'] + [f'{v:.4f}' for v in self._disp(trace)])
-            logger.info(f'Данные сохранены: {path}')
+                writer.writerow([title for title, _ in columns])
+                depth = max(len(values) for _, values in columns)
+                for i in range(depth):
+                    writer.writerow([_csv_num(values[i]) if i < len(values) else ''
+                                     for _, values in columns])
+            logger.info(f'Данные сохранены: {path} ({len(columns)} столбцов)')
         except Exception as exc:
             logger.error(f'Ошибка экспорта CSV: {exc}')
             QtWidgets.QMessageBox.critical(self, 'Ошибка экспорта', str(exc))
 
 
 # ==================================================================== Окно
-class FarFieldDialog(QtWidgets.QDialog):
+class FarFieldWindow(QtWidgets.QMainWindow):
+    """Главное окно утилиты.
+
+    QMainWindow, а не QDialog: шапка из полутора десятков виджетов не влезала
+    в узкое окно и молча обрезалась, а полоса прогресса, появляясь и исчезая,
+    дёргала всю компоновку. Тулбар сам прячет лишнее в меню переполнения,
+    статусная строка держит место под прогресс постоянно.
+    """
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle('Дальняя зона (расчёт ДН)')
-        self.setWindowFlags(
-            self.windowFlags()
-            | QtCore.Qt.WindowMaximizeButtonHint
-            | QtCore.Qt.WindowMinimizeButtonHint
-            | QtCore.Qt.WindowSystemMenuHint
-        )
-        self.setSizeGripEnabled(True)
-        self.setMinimumSize(1080, 700)
-        self.resize(1300, 820)
+        self.setMinimumSize(960, 600)
+        self._resize_to_screen(1300, 820)
         self.setAcceptDrops(True)
 
         self._result = None
@@ -1059,6 +1556,7 @@ class FarFieldDialog(QtWidgets.QDialog):
         self._view = 'near'         # 'near' — ближнее поле, 'far' — сечения ДН
         self._view_beams = []       # что сейчас в комбобоксах (зависит от вида)
         self._view_freqs = []
+        self._beam_order = self._load_beam_order()
         self._cache = {}
         self._params = self._load_saved_params()
         self._default_step = (1.0, 1.0)
@@ -1123,16 +1621,60 @@ class FarFieldDialog(QtWidgets.QDialog):
         s.sync()
 
     # ----------------------------------- запоминание окна и последней папки
+    @staticmethod
+    def _available_area():
+        """Рабочая область экрана (без панели задач) или None."""
+        screen = QtGui.QGuiApplication.primaryScreen()
+        return screen.availableGeometry() if screen is not None else None
+
+    def _resize_to_screen(self, width, height):
+        """Стартовый размер, который заведомо влезает в экран.
+
+        Прежние 1300×820 не помещались на обычном ноутбуке 1920×1080 при
+        масштабе 150 %: логически это 1280×720, и окно открывалось больше
+        рабочей области (а прежний минимум 1080×700 не давал его ужать).
+        """
+        area = self._available_area()
+        if area is not None:
+            width = min(width, area.width() - 40)
+            height = min(height, area.height() - 60)
+        self.resize(max(width, 640), max(height, 480))
+
+    def _fit_into_screen(self):
+        """Ужать окно до экрана — геометрия могла сохраниться с монитора крупнее."""
+        area = self._available_area()
+        if area is None:
+            return
+        size = self.size()
+        width = min(size.width(), area.width())
+        height = min(size.height(), area.height())
+        if (width, height) != (size.width(), size.height()):
+            self.resize(width, height)
+        if not area.intersects(self.frameGeometry()):
+            self.move(area.topLeft())
+
     def _restore_window_state(self):
-        geo = self._settings().value('far_field/geometry')
+        settings = self._settings()
+        geo = settings.value('far_field/geometry')
         if geo is not None:
             try:
                 self.restoreGeometry(geo)
             except Exception:
                 pass
+        # Ширина панели метрик — вещь личная: кому-то нужны полные подписи,
+        # кому-то максимум графика. Запоминаем вместе с геометрией окна.
+        sizes = settings.value('far_field/splitter')
+        if sizes is not None:
+            try:
+                self._splitter.restoreState(sizes)
+            except Exception:
+                pass
+        self._fit_into_screen()
 
     def _save_window_state(self):
-        self._settings().setValue('far_field/geometry', self.saveGeometry())
+        settings = self._settings()
+        settings.setValue('far_field/geometry', self.saveGeometry())
+        settings.setValue('far_field/splitter', self._splitter.saveState())
 
     def _last_folder(self):
         return self._settings().value('far_field/last_folder', '') or ''
@@ -1140,25 +1682,53 @@ class FarFieldDialog(QtWidgets.QDialog):
     def _set_last_folder(self, folder):
         self._settings().setValue('far_field/last_folder', folder)
 
+    _BEAM_ORDERS = (
+        ('по номеру', BEAM_ORDER_NUMBER),
+        ('по азимуту α', BEAM_ORDER_AZIMUTH),
+        ('по углу места β', BEAM_ORDER_ELEVATION),
+    )
+
+    def _load_beam_order(self):
+        """Запомненный порядок перебора лучей (между сессиями)."""
+        saved = str(self._settings().value('far_field/beam_order', '') or '')
+        known = {mode for _, mode in self._BEAM_ORDERS}
+        return saved if saved in known else BEAM_ORDER_NUMBER
+
     def _build_ui(self):
-        root = QtWidgets.QVBoxLayout(self)
-        root.setContentsMargins(12, 12, 12, 12)
-        root.setSpacing(10)
-        root.addLayout(self._build_top_bar())
-        body = QtWidgets.QHBoxLayout()
-        body.setSpacing(10)
-        body.addWidget(self._build_left_panel(), 0)
-        body.addWidget(self._build_plots(), 1)
-        root.addLayout(body, 1)
-        root.addLayout(self._build_progress_bar())
+        toolbar = self._build_toolbar()
+        toolbar.setObjectName('mainToolBar')   # нужен для saveState()
+        self.addToolBar(toolbar)
+
+        central = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(central)
+        layout.setContentsMargins(10, 8, 10, 4)
+
+        # Сплиттер вместо жёстких 300 px: из-за фиксированной ширины подписи
+        # метрик приходилось сокращать («Задан. α/β») и переносить по словам.
+        self._splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        self._splitter.setChildrenCollapsible(False)
+        self._splitter.setHandleWidth(8)
+        self._splitter.addWidget(self._build_left_panel())
+        self._splitter.addWidget(self._build_plots())
+        self._splitter.setStretchFactor(0, 0)
+        self._splitter.setStretchFactor(1, 1)
+        self._splitter.setSizes([320, 900])
+        layout.addWidget(self._splitter)
+
+        self.setCentralWidget(central)
+        self._build_status_bar()
         self._sync_view_widgets()   # стартуем на ближнем поле: метрики ДН скрыты
 
-    def _build_top_bar(self):
-        bar = QtWidgets.QHBoxLayout()
-        bar.setSpacing(8)
+    def _build_toolbar(self):
+        bar = QtWidgets.QToolBar('Основная панель')
+        bar.setMovable(False)
+        bar.setFloatable(False)
+        bar.setIconSize(QtCore.QSize(ICON_SM, ICON_SM))
 
         self.open_btn = QtWidgets.QPushButton('Открыть папку')
-        set_button_icon(self.open_btn, 'folder-open')
+        # Пока данных нет, главное действие экрана — открыть папку; после
+        # загрузки акцент переезжает на «Пересчитать…» (см. _apply_result).
+        self._set_primary(self.open_btn, 'folder-open', True)
         self.open_btn.setToolTip('Выбрать папку с результатами сканирования лучей (Beam№*.xlsx)')
         self.open_btn.clicked.connect(self.open_folder)
         bar.addWidget(self.open_btn)
@@ -1179,7 +1749,7 @@ class FarFieldDialog(QtWidgets.QDialog):
         self.recalc_btn.setEnabled(False)
         bar.addWidget(self.recalc_btn)
 
-        bar.addSpacing(8)
+        bar.addSeparator()
         self.near_btn = self._view_button('near-field', 'Ближнее поле',
                                           'Измеренное поле по апертуре (2D)', 'near')
         self.far_btn = self._view_button('far-field', 'Главные сечения ДН',
@@ -1190,10 +1760,7 @@ class FarFieldDialog(QtWidgets.QDialog):
         bar.addWidget(self.near_btn)
         bar.addWidget(self.far_btn)
 
-        self.folder_label = QtWidgets.QLabel('Папка не выбрана')
-        self.folder_label.setObjectName('ffFolderLabel')
-        bar.addWidget(self.folder_label, 1)
-
+        bar.addSeparator()
         self.hold_btn = QtWidgets.QPushButton('Закрепить')
         set_button_icon(self.hold_btn, 'pin')
         self.hold_btn.setToolTip('Закрепить текущие трассы для сравнения')
@@ -1201,13 +1768,14 @@ class FarFieldDialog(QtWidgets.QDialog):
         self.hold_btn.setEnabled(False)
         bar.addWidget(self.hold_btn)
 
-        self.clear_overlays_btn = QtWidgets.QPushButton('Очистить нал.')
+        self.clear_overlays_btn = QtWidgets.QPushButton('Очистить наложения')
         set_button_icon(self.clear_overlays_btn, 'eraser')
         self.clear_overlays_btn.setToolTip('Убрать закреплённые трассы')
         self.clear_overlays_btn.clicked.connect(self._clear_overlays)
         self.clear_overlays_btn.setEnabled(False)
         bar.addWidget(self.clear_overlays_btn)
 
+        bar.addSeparator()
         self.beam_kind_label = QtWidgets.QLabel('Луч:')
         bar.addWidget(self.beam_kind_label)
         self.beam_prev_btn = self._nav_button('back', 'Предыдущий луч  [←]', self._beam_prev,
@@ -1223,7 +1791,19 @@ class FarFieldDialog(QtWidgets.QDialog):
                                               QtGui.QKeySequence(QtCore.Qt.Key_Right))
         bar.addWidget(self.beam_next_btn)
 
-        bar.addSpacing(12)
+        self.order_combo = QtWidgets.QComboBox()
+        self.order_combo.setToolTip(
+            'Порядок перебора лучей стрелками ←/→:\n'
+            '• по номеру — как пронумерованы;\n'
+            '• по азимуту α — все углы места при одном азимуте, затем следующий азимут;\n'
+            '• по углу места β — все азимуты при одном угле места, затем следующий.')
+        for text, mode in self._BEAM_ORDERS:
+            self.order_combo.addItem(text, mode)
+        self.order_combo.setCurrentIndex(max(0, self.order_combo.findData(self._beam_order)))
+        self.order_combo.currentIndexChanged.connect(self._on_order_changed)
+        bar.addWidget(self.order_combo)
+
+        bar.addSeparator()
         bar.addWidget(QtWidgets.QLabel('Частота:'))
         self.freq_prev_btn = self._nav_button('back', 'Предыдущая частота  [PgUp]', self._freq_prev,
                                               QtGui.QKeySequence(QtCore.Qt.Key_PageUp))
@@ -1237,12 +1817,25 @@ class FarFieldDialog(QtWidgets.QDialog):
         bar.addWidget(self.freq_next_btn)
         return bar
 
+    @staticmethod
+    def _set_primary(button, icon_name, primary):
+        """Пометить кнопку главным действием экрана (акцентная заливка).
+
+        Заодно перекрашивает иконку: тёмно-серый глиф на индиго-заливке
+        сливался бы с фоном.
+        """
+        button.setProperty('primary', primary)
+        set_button_icon(button, icon_name,
+                        color=ICON_ON_ACCENT if primary else ICON_DEFAULT)
+        button.style().unpolish(button)
+        button.style().polish(button)
+
     def _view_button(self, icon, text, tooltip, view):
         """Кнопка выбора вида (ближнее поле / дальняя зона) — как радиокнопка."""
         btn = QtWidgets.QToolButton()
         btn.setText(text)
         btn.setToolButtonStyle(QtCore.Qt.ToolButtonTextBesideIcon)
-        set_button_icon(btn, icon, size=14)
+        set_button_icon(btn, icon, size=ICON_SM)
         btn.setCheckable(True)
         btn.setAutoExclusive(False)   # переключаем вручную: вид может не смениться
         btn.setToolTip(tooltip)
@@ -1253,30 +1846,44 @@ class FarFieldDialog(QtWidgets.QDialog):
     def _nav_button(self, icon, tooltip, slot, shortcut=None):
         btn = QtWidgets.QToolButton()
         btn.setProperty('navButton', True)
-        set_button_icon(btn, icon, size=14)
+        set_button_icon(btn, icon, size=ICON_SM)
         if shortcut is not None:
             btn.setShortcut(shortcut)
         btn.setToolTip(tooltip)
         btn.clicked.connect(slot)
         return btn
 
-    def _build_progress_bar(self):
-        row = QtWidgets.QHBoxLayout()
+    def _build_status_bar(self):
+        """Источник данных слева, прогресс и отмена справа.
+
+        Полоса прогресса раньше жила в компоновке окна и, появляясь, сдвигала
+        график; в статусной строке место под неё есть всегда.
+        """
+        status = self.statusBar()
+        status.setSizeGripEnabled(True)
+
+        self.folder_label = QtWidgets.QLabel('Папка не выбрана')
+        self.folder_label.setObjectName('ffFolderLabel')
+        self.folder_label.setMinimumWidth(80)
+        status.addWidget(self.folder_label, 1)
+
         self.progress = QtWidgets.QProgressBar()
         self.progress.setRange(0, 100)
         self.progress.setTextVisible(True)
         self.progress.setVisible(False)
-        row.addWidget(self.progress, 1)
+        self.progress.setFixedWidth(340)
+        status.addPermanentWidget(self.progress)
+
         self.cancel_btn = QtWidgets.QPushButton('Отмена')
         set_button_icon(self.cancel_btn, 'stop')
         self.cancel_btn.clicked.connect(self._cancel_current)
         self.cancel_btn.setVisible(False)
-        row.addWidget(self.cancel_btn)
-        return row
+        status.addPermanentWidget(self.cancel_btn)
 
     def _build_left_panel(self):
         panel = QtWidgets.QWidget()
-        panel.setFixedWidth(300)
+        panel.setMinimumWidth(260)
+        panel.setMaximumWidth(520)
         layout = QtWidgets.QVBoxLayout(panel)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(10)
@@ -1286,18 +1893,22 @@ class FarFieldDialog(QtWidgets.QDialog):
         n.setContentsMargins(12, 12, 12, 12)
         self.lbl_nf_angles = self._metric()
         self.lbl_nf_max = self._metric()
-        self.lbl_nf_pos = self._metric()
-        self.lbl_nf_dyn = self._metric()
-        self.lbl_nf_phase = self._metric()
+        self.lbl_nf_max_pos = self._metric()
+        self.lbl_nf_dynamic = self._metric()
+        self.lbl_nf_phase_span = self._metric()
         self.lbl_nf_points = self._metric()
         self.lbl_nf_size = self._metric()
-        n.addRow('Задан. α/β, °:', self.lbl_nf_angles)
+        self.lbl_nf_grid = self._metric()
+        n.addRow('Заданный α / β, °:', self.lbl_nf_angles)
         n.addRow('Максимум, дБ:', self.lbl_nf_max)
-        n.addRow('Макс. в точке X/Y, см:', self.lbl_nf_pos)
-        n.addRow('Размах ампл., дБ:', self.lbl_nf_dyn)
-        n.addRow('Размах фазы, °:', self.lbl_nf_phase)
+        # Где именно максимум, размах амплитуды и фазы — это уже считалось в
+        # field_stats, но никуда не выводилось.
+        n.addRow('Максимум в X/Y, см:', self.lbl_nf_max_pos)
+        n.addRow('Размах амплитуды, дБ:', self.lbl_nf_dynamic)
+        n.addRow('Размах фазы, °:', self.lbl_nf_phase_span)
         n.addRow('Измерено точек:', self.lbl_nf_points)
         n.addRow('Апертура X×Y, см:', self.lbl_nf_size)
+        n.addRow('Сетка X×Y, точек:', self.lbl_nf_grid)
         layout.addWidget(self.near_group)
 
         # Сведения о самом скане: строки собираются по факту наличия данных,
@@ -1329,7 +1940,7 @@ class FarFieldDialog(QtWidgets.QDialog):
         m.addRow('УБЛ Az, дБ:', self.lbl_sll_az)
         m.addRow('УБЛ El, дБ:', self.lbl_sll_el)
         m.addRow('Фаза в макс., °:', self.lbl_phase_max)
-        m.addRow('Задан. (α/β), °:', self.lbl_set_angle)
+        m.addRow('Заданный α / β, °:', self.lbl_set_angle)
         layout.addWidget(metrics_group)
 
         mask_group = QtWidgets.QGroupBox('Маска УБЛ')
@@ -1367,10 +1978,10 @@ class FarFieldDialog(QtWidgets.QDialog):
     def _build_plots(self):
         self.near_panel = NearFieldPanel()
         self.plot_panel = FarFieldPlotPanel([
-            ('Az ампл.', AZ_COLOR, 'L'),
-            ('El ампл.', EL_COLOR, 'L'),
-            ('Az фаза', PHASE_AZ_COLOR, 'R'),
-            ('El фаза', PHASE_EL_COLOR, 'R'),
+            ('Az ампл.', AZ_COLOR, 'L', False),
+            ('El ампл.', EL_COLOR, 'L', False),
+            ('Az фаза', PHASE_AZ_COLOR, 'R', True),
+            ('El фаза', PHASE_EL_COLOR, 'R', True),
         ])
         self.panels = [self.plot_panel]   # закрепление трасс — только у дальней зоны
 
@@ -1384,6 +1995,7 @@ class FarFieldDialog(QtWidgets.QDialog):
         lbl = QtWidgets.QLabel('—')
         lbl.setProperty('metricValue', True)
         lbl.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+        lbl.setWordWrap(True)   # панель узкая (300 px) — длинное значение переносим, а не режем
         return lbl
 
     # --------------------------------------------------------------- Поток
@@ -1465,8 +2077,7 @@ class FarFieldDialog(QtWidgets.QDialog):
         self.progress.setValue(0)
         self.progress.setFormat('Подготовка…')
         name = os.path.basename(path.rstrip('/\\')) or path
-        self.folder_label.setText(f'Загрузка: {name}')
-        self.folder_label.setToolTip(path)
+        self._set_source_label(f'Загрузка: {name}', path)
 
         self._load_thread = QtCore.QThread()
         self._load_worker = _LoadWorker(kind, path)
@@ -1555,15 +2166,36 @@ class FarFieldDialog(QtWidgets.QDialog):
             self._set_last_folder(os.path.dirname(path))
             self._apply_result(result, path, single_file=True, scan_step=None)
 
+    def _set_source_label(self, text, tooltip):
+        """Подпись источника в статусной строке, с многоточием по ширине.
+
+        QLabel режет длинное имя папки без многоточия — по обрезку не понять,
+        что текст неполный. Полный путь остаётся в подсказке.
+        """
+        self._source_text = text
+        self.folder_label.setToolTip(tooltip)
+        self._elide_source_label()
+
+    def _elide_source_label(self):
+        text = getattr(self, '_source_text', '')
+        metrics = QtGui.QFontMetrics(self.folder_label.font())
+        width = max(self.folder_label.width(), 80)
+        self.folder_label.setText(
+            metrics.elidedText(text, QtCore.Qt.ElideMiddle, width))
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, 'folder_label'):
+            self._elide_source_label()
+
     def _restore_source_label(self):
         """Вернуть подпись источника после неудачной или отменённой загрузки."""
         src = self._folder
         if src:
-            self.folder_label.setText(os.path.basename(str(src).rstrip('/\\')) or str(src))
-            self.folder_label.setToolTip(str(src))
+            self._set_source_label(
+                os.path.basename(str(src).rstrip('/\\')) or str(src), str(src))
         else:
-            self.folder_label.setText('Папка не выбрана')
-            self.folder_label.setToolTip('')
+            self._set_source_label('Папка не выбрана', '')
 
     def _apply_result(self, result, source, single_file, scan_step):
         """Применить загруженный набор данных (папка или одиночный файл)."""
@@ -1575,10 +2207,15 @@ class FarFieldDialog(QtWidgets.QDialog):
         if not self._freqs and self._beams:
             self._freqs = sorted(result['data'][self._beams[0]].keys())
 
-        self.folder_label.setText(os.path.basename(source.rstrip('/\\')) or source)
-        self.folder_label.setToolTip(source)
+        self._set_source_label(
+            os.path.basename(source.rstrip('/\\')) or source, source)
         self.beam_kind_label.setText('Файл:' if single_file else 'Луч:')
+        # У одиночного файла луча (а значит и углов) нет — группировать нечего.
+        self.order_combo.setVisible(not single_file)
         self.recalc_btn.setEnabled(True)
+        # Данные есть — теперь главное действие экрана это пересчёт.
+        self._set_primary(self.open_btn, 'folder-open', False)
+        self._set_primary(self.recalc_btn, 'recalc', True)
 
         # Новые данные — прежний расчёт к ним не относится: дальняя зона гаснет.
         self._cache = {}
@@ -1704,7 +2341,8 @@ class FarFieldDialog(QtWidgets.QDialog):
         self.open_file_btn.setEnabled(not busy)
         self.recalc_btn.setEnabled(not busy and self._result is not None)
         for w in (self.beam_combo, self.freq_combo, self.beam_prev_btn,
-                  self.beam_next_btn, self.freq_prev_btn, self.freq_next_btn):
+                  self.beam_next_btn, self.freq_prev_btn, self.freq_next_btn,
+                  self.order_combo):
             w.setEnabled(not busy)
 
     # --------------------------------------------------------- Навигация
@@ -1712,6 +2350,15 @@ class FarFieldDialog(QtWidgets.QDialog):
         if self._updating:
             return
         self._display_current()
+
+    def _on_order_changed(self, _index=None):
+        """Сменить порядок лучей в списке. Выбранный луч остаётся выбранным:
+        _populate_combos ищет его по значению, поэтому перерисовка не нужна."""
+        if self._updating:
+            return
+        self._beam_order = self.order_combo.currentData() or BEAM_ORDER_NUMBER
+        self._settings().setValue('far_field/beam_order', self._beam_order)
+        self._populate_combos()
 
     def _beam_prev(self):
         self._step_combo(self.beam_combo, -1)
@@ -1783,6 +2430,7 @@ class FarFieldDialog(QtWidgets.QDialog):
             beams, freqs = list(self._computed_beams), list(self._computed_freqs)
         else:
             beams, freqs = list(self._beams), list(self._freqs)
+        beams = order_beams(beams, self._beam_order)
 
         self._updating = True
         try:
@@ -1821,11 +2469,20 @@ class FarFieldDialog(QtWidgets.QDialog):
             return None
 
     def _beam_item_text(self, beam):
-        """Номер луча вместе с углами отклонения — для списка выбора."""
+        """Номер луча вместе с углами отклонения — для списка выбора.
+
+        В сгруппированном порядке ведущий угол идёт первым: так на глаз видно,
+        где кончается одна группа и начинается следующая.
+        """
         angles = self._beam_angles(beam)
         if angles is None:
             return str(beam)
-        return f'{beam}  ·  α={angles[0]:.2f} β={angles[1]:.2f}'
+        alpha, beta = angles
+        if self._beam_order == BEAM_ORDER_AZIMUTH:
+            return f'α={alpha:.2f}  ·  β={beta:.2f}  ·  луч {beam}'
+        if self._beam_order == BEAM_ORDER_ELEVATION:
+            return f'β={beta:.2f}  ·  α={alpha:.2f}  ·  луч {beam}'
+        return f'{beam}  ·  α={alpha:.2f} β={beta:.2f}'
 
     def _current_label(self):
         beam, freq = self._current_beam_freq()
@@ -1975,9 +2632,9 @@ class FarFieldDialog(QtWidgets.QDialog):
         self.scan_group.setVisible(bool(rows) and self._view == 'near')
 
     def _update_near_metrics(self, stats):
-        labels = (self.lbl_nf_angles, self.lbl_nf_max, self.lbl_nf_pos,
-                  self.lbl_nf_dyn, self.lbl_nf_phase, self.lbl_nf_points,
-                  self.lbl_nf_size)
+        labels = (self.lbl_nf_angles, self.lbl_nf_max, self.lbl_nf_max_pos,
+                  self.lbl_nf_dynamic, self.lbl_nf_phase_span,
+                  self.lbl_nf_points, self.lbl_nf_size, self.lbl_nf_grid)
         if not stats:
             for lbl in labels:
                 lbl.setText('—')
@@ -1993,18 +2650,17 @@ class FarFieldDialog(QtWidgets.QDialog):
 
         self.lbl_nf_max.setText(num(stats['max_db']))
         if stats['max_x'] is None or stats['max_y'] is None:
-            self.lbl_nf_pos.setText('—')
+            self.lbl_nf_max_pos.setText('—')
         else:
-            self.lbl_nf_pos.setText(f"{stats['max_x']:.1f} / {stats['max_y']:.1f}")
-        self.lbl_nf_dyn.setText(num(stats['dynamic_db']))
-        self.lbl_nf_phase.setText(num(stats['phase_span'], '{:.1f}'))
+            self.lbl_nf_max_pos.setText(f"{stats['max_x']:.1f} / {stats['max_y']:.1f}")
+        self.lbl_nf_dynamic.setText(num(stats['dynamic_db'], '{:.1f}'))
+        self.lbl_nf_phase_span.setText(num(stats['phase_span'], '{:.1f}'))
         self.lbl_nf_points.setText(f"{stats['measured']} из {stats['total']}")
         if stats['size_x'] is None or stats['size_y'] is None:
-            self.lbl_nf_size.setText(f"— ({stats['n_x']}×{stats['n_y']} точек)")
+            self.lbl_nf_size.setText('—')
         else:
-            self.lbl_nf_size.setText(
-                f"{stats['size_x']:.1f} × {stats['size_y']:.1f}"
-                f"  ({stats['n_x']}×{stats['n_y']} точек)")
+            self.lbl_nf_size.setText(f"{stats['size_x']:.1f} × {stats['size_y']:.1f}")
+        self.lbl_nf_grid.setText(f"{stats['n_x']} × {stats['n_y']}")
 
     def _display_far(self):
         beam, freq = self._current_beam_freq()
@@ -2122,10 +2778,18 @@ class FarFieldDialog(QtWidgets.QDialog):
     ]
 
     def _metrics_rows(self):
-        """Строки таблицы метрик по всем рассчитанным (луч, частота)."""
+        """Строки таблицы метрик по всем рассчитанным (луч, частота).
+
+        Лучи идут в том же порядке, что выбран в списке: таблица читается так
+        же, как они перебираются в окне.
+        """
         rows = []
-        for beam, freq in sorted(self._cache.keys()):
-            e = self._cache[(beam, freq)]
+        beams = order_beams(sorted({b for b, _ in self._cache}), self._beam_order)
+        freqs = sorted({f for _, f in self._cache})
+        for beam, freq in ((b, f) for b in beams for f in freqs):
+            e = self._cache.get((beam, freq))
+            if e is None:
+                continue
             bw_az = self._beamwidth(self._az_deg, e['az_amp'])
             bw_el = self._beamwidth(self._el_deg, e['el_amp'])
             try:
